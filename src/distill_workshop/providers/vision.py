@@ -76,7 +76,8 @@ def _marker(lo: int, hi: int, names: list[str]) -> str:
 def describe_images(image_paths: list[Path], prompt: str,
                     providers: list[ProviderConfig], timeout: int = 180,
                     *, batch_size: int = 1, workers: int = 2,
-                    max_tokens: int | None = None, on_step=None) -> ChatResult:
+                    max_tokens: int | None = None, on_step=None,
+                    retry_pause: float = 0.0) -> ChatResult:
     """逐帧（或按 batch_size 小批）理解画面，返回拼好的 ChatResult。
 
     batch_size=1 是默认，也是老工具验证过的形态；调大只换来"少几次请求"，
@@ -93,10 +94,12 @@ def describe_images(image_paths: list[Path], prompt: str,
     results: list[str | None] = [None] * len(groups)
     used: dict[str, str] = {}
     failures: list[str] = []
+    failed_groups: list[int] = []
     lock = threading.Lock()
     done = 0
 
-    def work(gi: int) -> None:
+    def attempt(gi: int, index: int) -> bool:
+        """理解第 gi 组，成功返回 True。失败只标记该组，不抛。"""
         nonlocal done
         g = groups[gi]
         lo = gi * max(1, batch_size) + 1
@@ -113,16 +116,29 @@ def describe_images(image_paths: list[Path], prompt: str,
                 results[gi] = f"（画面理解失败：{type(e).__name__}）"
                 done += 1
                 n = done
+                if gi not in failed_groups:
+                    failed_groups.append(gi)
             if on_step:
-                on_step(f"   [!] 第 {lo} 张图理解失败（{type(e).__name__}），继续其余帧 [{n}/{len(groups)}]")
-            return
+                tag = "" if index == 0 else f"（补采第 {index} 轮）"
+                on_step(f"   [!] 第 {lo} 张图理解失败（{type(e).__name__}）{tag}，"
+                        f"继续其余帧 [{n}/{len(groups)}]")
+            return False
         with lock:
             used[r.provider] = r.model
             results[gi] = _marker(lo, hi, [p.name for p in g]) + "\n" + r.content.strip()
+            if gi in failed_groups:
+                failed_groups.remove(gi)
             done += 1
             n = done
         if on_step and len(groups) > 1:
-            on_step(f"   画面理解 [{n}/{len(groups)}]")
+            if index == 0:
+                on_step(f"   画面理解 [{n}/{len(groups)}]")
+            else:
+                on_step(f"   补采画面 {n - len(groups)}/{len(groups)}")
+        return True
+
+    def work(gi: int) -> None:
+        attempt(gi, 0)
 
     if workers > 1 and len(groups) > 1:
         with ThreadPoolExecutor(max_workers=min(workers, len(groups))) as ex:
@@ -131,8 +147,26 @@ def describe_images(image_paths: list[Path], prompt: str,
         for gi in range(len(groups)):
             work(gi)
 
-    if len(failures) == len(groups):
+    # —— 失败帧补采（免费通道 429 是暂时性的，隔一会儿单线程重来往往能成）——
+    # 只重试失败的组，不动已成功的；仍失败就保留「画面理解失败」标记，绝不编造。
+    if retry_pause > 0 and failed_groups and len(failed_groups) < len(groups):
+        import time
+        rounds = 2
+        for rnd in range(1, rounds + 1):
+            if not failed_groups:
+                break
+            if on_step:
+                on_step(f"   ↻ 补采 {len(failed_groups)} 帧失败画面（第 {rnd} 轮，等 {retry_pause:.0f}s）...")
+            time.sleep(retry_pause)
+            failures.clear()  # 只统计最后一轮仍失败的
+            # 快照：attempt() 成功会把该组从 failed_groups 里移除，不能直接迭代原表
+            for gi in tuple(failed_groups):
+                attempt(gi, rnd)
+
+    if len(failures) >= len(groups):
         raise RuntimeError("画面理解全部失败（{} 帧）：{}".format(len(paths), " | ".join(failures[:3])))
+    if failures and on_step:
+        on_step(f"   ⚠️ 补采后仍有 {len(failures)}/{len(groups)} 帧画面理解失败（已如实标记，未编造）")
 
     parts = [txt or "" for txt in results]
     names = ",".join(used) or ",".join(p.name for p in providers)

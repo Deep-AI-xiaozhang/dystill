@@ -109,6 +109,59 @@ def test_no_vision_provider_raises():
     assert "能读图的模型" in str(e.value)
 
 
+def test_retry_recovers_transient_frame_failure(tmp_path, monkeypatch):
+    """免费通道 429 是暂时性的：首轮失败的帧要补采回来，而不是直接丢掉。
+
+    实测（2026-10-18）48 帧里有 15 帧因 429 失败，等于丢了 31% 画面信息，
+    而画面正是这个工具区别于"纯转写总结"的地方。
+    """
+    # 第 1 次调用（第 1 帧）成功，第 2 次（第 2 帧）失败，补采时第 3 次成功
+    spy = _Spy(fail_on={2})
+    monkeypatch.setattr(vlm, "chat", spy)
+    frames = _frames(tmp_path, 2)
+    r = vlm.describe_images(frames, "prompt", [ProviderConfig(name="p", api_base="u", api_key="k", model="m")],
+                            retry_pause=0.01)
+    assert "画面理解失败" not in r.content, "补采成功后不该还留着失败标记"
+    assert "画面文字" in r.content
+    assert len(spy.calls) == 3, "补采只该重试失败的那一帧"
+
+
+def test_retry_keeps_marker_when_still_failing(tmp_path, monkeypatch):
+    """补采也救不回来时必须如实标记失败，绝不编造画面描述。"""
+
+    class _AlwaysFailSecond:
+        def __init__(self):
+            self.calls = 0
+
+        def __call__(self, messages, providers, **kw):
+            self.calls += 1
+            if self.calls >= 2:            # 第 2 帧起全失败（含补采）
+                raise RuntimeError("429 too many requests")
+            return ChatResult(content="画面文字 1", provider="p", model="m")
+
+    spy = _AlwaysFailSecond()
+    monkeypatch.setattr(vlm, "chat", spy)
+    frames = _frames(tmp_path, 2)
+    steps = []
+    r = vlm.describe_images(frames, "prompt", [ProviderConfig(name="p", api_base="u", api_key="k", model="m")],
+                            retry_pause=0.01, on_step=steps.append)
+    assert "画面理解失败" in r.content
+    assert "画面文字 1" in r.content
+    # 必须有一条日志如实报告"补采后仍有 N 帧失败"
+    assert any("仍有" in s and "失败" in s for s in steps), steps
+
+
+def test_no_retry_when_all_frames_failed(tmp_path, monkeypatch):
+    """全帧失败不补采（重试也白试），直接抛错。"""
+    spy = _Spy(fail_on={1, 2})
+    monkeypatch.setattr(vlm, "chat", spy)
+    frames = _frames(tmp_path, 2)
+    with pytest.raises(RuntimeError):
+        vlm.describe_images(frames, "prompt", [ProviderConfig(name="p", api_base="u", api_key="k", model="m")],
+                            retry_pause=0.01)
+    assert len(spy.calls) == 2, "全失败时不应多跑补采"
+
+
 def test_provider_max_tokens_is_applied(tmp_path, monkeypatch):
     """provider 自己的 max_tokens 上限要自动生效（glm-4v-flash 硬上限 1024 就是这么踩到的）。"""
     from distill_workshop.providers import llm

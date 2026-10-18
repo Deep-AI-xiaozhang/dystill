@@ -63,9 +63,11 @@ def _default_vlm(frames: list[Path], app: AppConfig, on_step: Callable) -> str:
                            "（纯文本模型请在 providers 里标 vision: false）")
     batch = int(app.pipeline.get("vlm_batch_frames", 1) or 1)
     workers = int(app.pipeline.get("workers", 2) or 1)
+    retry_pause = float(app.pipeline.get("vlm_retry_pause", 30) or 0)
     _log(on_step, f"④ 画面理解（VLM：{len(frames)} 帧 / 每请求 {batch} 帧 / {workers} 路并发）...")
     r = describe_images(frames, PROMPT_SINGLE if batch <= 1 else PROMPT_MULTI, providers,
-                        batch_size=batch, workers=workers, on_step=on_step)
+                        batch_size=batch, workers=workers, on_step=on_step,
+                        retry_pause=retry_pause)
     return r.content
 
 
@@ -78,9 +80,11 @@ def _gallery_vlm(images: list[Path], app: AppConfig, on_step: Callable) -> str:
                            "（纯文本模型请在 providers 里标 vision: false）")
     batch = int(app.pipeline.get("vlm_batch_frames", 1) or 1)
     workers = int(app.pipeline.get("workers", 2) or 1)
+    retry_pause = float(app.pipeline.get("vlm_retry_pause", 30) or 0)
     _log(on_step, f"④ 图片理解（VLM：{len(images)} 张 / 每请求 {batch} 张 / {workers} 路并发）...")
     r = describe_images(images, PROMPT_GALLERY, providers,
-                        batch_size=batch, workers=workers, on_step=on_step)
+                        batch_size=batch, workers=workers, on_step=on_step,
+                        retry_pause=retry_pause)
     return r.content
 
 
