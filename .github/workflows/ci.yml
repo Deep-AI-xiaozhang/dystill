@@ -73,7 +73,9 @@ jobs:
               if line.startswith(("License-Expression:", "License-File:", "Project-URL:")):
                   print(line)
           assert "License-Expression: MIT" in metadata, "METADATA 缺 License-Expression: MIT"
-          assert "Project-URL: Repository, https://github.com/OWNER/dystill" in metadata
+          # 不要硬编码账号名：URL 会随仓库迁移（改账号名 / 转组织）变化，只看结构
+          assert "Project-URL: Repository, https://github.com/" in metadata, "METADATA 缺 Repository 链接"
+          assert "Project-URL: Homepage, https://github.com/" in metadata, "METADATA 缺 Homepage 链接"
           assert any(n.endswith("distill_workshop/config.example.yaml") for n in names), \
               "wheel 里缺 config.example.yaml（dystill init 会坏）"
           print("wheel metadata ok")

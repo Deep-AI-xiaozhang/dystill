@@ -10,6 +10,10 @@
 *.mp4 binary
 *.whl binary
 
+# 带 shebang 的辅助脚本在 git 里必须有可执行位：
+# Windows 没有这个文件权限位，本地永远看不出问题，但 Linux CI 的 ruff EXE001 会报错。
+scripts/*.py text eol=lf
+
 # GitHub 语言统计：文档不计入
 *.md linguist-documentation
 docs/** linguist-documentation
