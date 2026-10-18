@@ -1,0 +1,118 @@
+name: CI
+
+on:
+  push:
+    branches: [main, master, release-public]
+  pull_request:
+
+# 默认 token 只读：CI 不需要写仓库
+permissions:
+  contents: read
+
+# 同分支新提交取消旧运行，避免排队烧额度
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    name: 测试与静态检查（py${{ matrix.python-version }}）
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.10", "3.12"]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+          cache: pip
+      - name: 安装（本体 + 测试 + ruff）
+        run: |
+          python -m pip install -U pip
+          pip install -e .
+          pip install pytest ruff
+      - name: 单元测试（不需要 key / 不需要网络）
+        run: pytest -q
+      - name: 代码检查（ruff 全量，必须零告警）
+        run: ruff check .
+
+  build:
+    name: 构建 / 元数据 / wheel 冒烟
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+      - name: 安装构建工具
+        run: |
+          python -m pip install -U pip
+          pip install build twine
+      - name: 构建 sdist + wheel
+        run: python -m build
+      - name: twine 校验（README/元数据不合法会在这里红）
+        run: twine check dist/*
+      - name: 断言 wheel 元数据与包内配置模板
+        run: |
+          python - <<'PY'
+          import glob
+          import zipfile
+
+          whl = glob.glob("dist/*.whl")[0]
+          with zipfile.ZipFile(whl) as zf:
+              names = zf.namelist()
+              metadata_name = [n for n in names if n.endswith(".dist-info/METADATA")][0]
+              metadata = zf.read(metadata_name).decode("utf-8")
+          print("wheel:", whl)
+          for line in metadata.splitlines():
+              if line.startswith(("License-Expression:", "License-File:", "Project-URL:")):
+                  print(line)
+          assert "License-Expression: MIT" in metadata, "METADATA 缺 License-Expression: MIT"
+          assert "Project-URL: Repository, https://github.com/OWNER/dystill" in metadata
+          assert any(n.endswith("distill_workshop/config.example.yaml") for n in names), \
+              "wheel 里缺 config.example.yaml（dystill init 会坏）"
+          print("wheel metadata ok")
+          PY
+      - name: wheel 冒烟（带依赖安装后 CLI 必须可用）
+        run: |
+          python -m venv "$RUNNER_TEMP/smoke"
+          "$RUNNER_TEMP/smoke/bin/pip" install -U pip
+          # 关键：不能加 --no-deps。wheel 运行时要 pyyaml/requests/Pillow/scenedetect，
+          # 旧 CI 用 --no-deps 装完再跑 dystill，必然 ModuleNotFoundError: yaml。
+          "$RUNNER_TEMP/smoke/bin/pip" install dist/*.whl
+          "$RUNNER_TEMP/smoke/bin/dystill" --version
+          cd "$RUNNER_TEMP"
+          # init 必须真生成配置文件：模板曾漏打不进 wheel，这里加断言防复发
+          "$RUNNER_TEMP/smoke/bin/dystill" init --force
+          test -f config.yaml || { echo "init 没生成 config.yaml"; exit 1; }
+          grep -q '^providers:' config.yaml || { echo "wheel 里的配置模板不完整"; exit 1; }
+          # clean 在没有残留时也要正常退出
+          "$RUNNER_TEMP/smoke/bin/dystill" clean
+          # doctor 输出必须能当 JSON 解析（不用 head：管道提前关闭会让进程报 BrokenPipe）
+          # 空配置下 doctor 退出码是 2（NEED_SETUP），这是预期，所以只断言 JSON 可解析
+          "$RUNNER_TEMP/smoke/bin/dystill" doctor --json > doctor.json || true
+          python -c "import json;d=json.load(open('doctor.json'));print('doctor ok =',d['ok'])"
+
+  windows:
+    name: Windows 单元测试（py3.12）
+    runs-on: windows-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+      - name: 安装（本体 + pytest）
+        run: |
+          python -m pip install -U pip
+          pip install -e .
+          pip install pytest
+      # 只跑单元测试：ffmpeg 相关的集成/下载路径在 Windows runner 上慢且不稳定，不放进 CI
+      - name: 单元测试
+        run: pytest -q

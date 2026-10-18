@@ -1,0 +1,86 @@
+[build-system]
+# PEP 639（license = SPDX 表达式 + license-files）需要 setuptools>=77；
+# 旧的 setuptools 会直接把 license 当文件路径处理，导致 METADATA 里没有 License-Expression。
+requires = ["setuptools>=77"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "dystill"
+version = "0.1.0"
+description = "蒸馏工坊：抖音优先、带笔记级事实核对（不瞎编、可回查）的本地视频蒸馏工具"
+readme = "README.md"
+license = "MIT"
+license-files = ["LICENSE"]
+requires-python = ">=3.10"
+authors = [{ name = "Dystill contributors" }]
+keywords = [
+  "douyin",
+  "video-notes",
+  "fact-check",
+  "agent-skill",
+  "video-to-text",
+  "transcript",
+  "speech-to-text",
+  "llm",
+  "local-first",
+  "chinese",
+]
+classifiers = [
+  "Development Status :: 3 - Alpha",
+  "Environment :: Console",
+  "Intended Audience :: End Users/Desktop",
+  # 注意：PEP 639 下 license = "MIT" 与旧的 "License :: OSI Approved :: MIT License"
+  # 分类器互斥（setuptools>=77 会直接报 InvalidConfigError），MIT 由 License-Expression 表达。
+  "Natural Language :: Chinese (Simplified)",
+  "Operating System :: OS Independent",
+  "Programming Language :: Python :: 3",
+  "Programming Language :: Python :: 3 :: Only",
+  "Programming Language :: Python :: 3.10",
+  "Programming Language :: Python :: 3.11",
+  "Programming Language :: Python :: 3.12",
+  "Programming Language :: Python :: 3.13",
+  "Topic :: Multimedia :: Video",
+  "Topic :: Text Processing :: Linguistic",
+]
+dependencies = [
+  "pyyaml>=6.0",
+  "requests>=2.31",
+  # 切帧主路径的硬依赖：此前只在开发环境里"碰巧装了"，全新机器按 README 装必崩/必退化
+  "Pillow>=10",          # core/vision.py 缩放 + 感知哈希：缺了 when 切出帧后直接 ImportError
+  "scenedetect>=0.6",    # 切镜头主路径：缺了会退回"整片抽 1 帧"，画面理解质量断崖
+]
+
+[project.optional-dependencies]
+local-stt = ["faster-whisper>=1.0"]
+# B 站分流（core/download.py 走 yt-dlp）。刻意不做硬依赖：产品定位"只做抖音"，
+# 每个本地文件/抖音用户都被迫装一个 B 站下载器，违背 v2 的"砍范围"精神。
+# 缺了不崩：B 站链接会给出可行动的安装提示。
+bilibili = ["yt-dlp>=2024.8.6"]
+# 抖音风控兜底：真浏览器取播放地址（core/browser_download.py）。
+# 只处理抖音链接时需要，且装完还得 `playwright install chromium`；没装会自动退回 API 重试，
+# 本地文件 / B 站路径完全不受影响——所以不做硬依赖。
+douyin-browser = ["playwright>=1.40"]
+dev = ["pytest>=8", "ruff>=0.6", "build>=1.2", "twine>=5"]
+
+[project.urls]
+# 发布前必须把 OWNER 换成真实 GitHub 账号/组织名；Homepage 与 Repository 不能留占位符上 PyPI。
+Homepage = "https://github.com/zhj-521-521/dystill"
+Repository = "https://github.com/zhj-521-521/dystill"
+Issues = "https://github.com/zhj-521-521/dystill/issues"
+Changelog = "https://github.com/zhj-521-521/dystill/releases"
+
+[project.scripts]
+dystill = "distill_workshop.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-data]
+distill_workshop = ["config.example.yaml"]
+
+[tool.pytest.ini_options]
+# 只收本仓库自己的测试。external/ 是第三方 checkout（douyin-downloader 自带 .git、
+# 其 tests 依赖把该目录加进 sys.path 才能 import 顶层 core），根目录裸跑 pytest 会把它们
+# 全部收进来 → 66 个收集错误直接 Interrupted。CI 与 `pytest` 开箱即用必须靠这一行。
+testpaths = ["tests"]
+norecursedirs = ["external", "data", "cache", "output", "notes", ".venv"]

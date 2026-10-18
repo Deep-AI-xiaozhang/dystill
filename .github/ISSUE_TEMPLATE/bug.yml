@@ -1,0 +1,86 @@
+name: Bug 报告
+description: 报告一个可复现的问题。请先自查隐私：不要粘贴 API key、cookie、私人视频链接或笔记原文。
+title: "[Bug] "
+body:
+  - type: markdown
+    attributes:
+      value: |
+        感谢反馈！提问前请先看 README 的「常见问题」和 `docs/`。
+        **本仓库不会要求你提供 API key**；任何凭据都只应留在你自己的机器上。
+
+  - type: checkboxes
+    id: privacy
+    attributes:
+      label: 隐私自查（必填）
+      description: 公开 issue 会被所有人看到，请逐项确认。
+      options:
+        - label: 我已确认没有粘贴 API key / token / cookie / 代理账号等任何凭据
+          required: true
+        - label: 我已确认日志和截图里没有私人视频链接、笔记原文或本机用户名/路径等敏感信息
+          required: true
+
+  - type: input
+    id: version
+    attributes:
+      label: dystill 版本
+      description: 运行 `dystill --version` 的结果
+      placeholder: "例如：dystill 0.1.0"
+    validations:
+      required: true
+
+  - type: dropdown
+    id: source-kind
+    attributes:
+      label: 素材类型
+      description: 请说明是抖音链接还是本地文件（这决定走哪条处理链）
+      options:
+        - 抖音链接
+        - 本地视频/音频文件
+        - B 站链接（可选路径）
+        - 与素材类型无关（安装/配置/CLI 问题）
+    validations:
+      required: true
+
+  - type: input
+    id: os-python
+    attributes:
+      label: 操作系统与 Python 版本
+      placeholder: "例如：Windows 11 / Python 3.11.9"
+    validations:
+      required: true
+
+  - type: textarea
+    id: steps
+    attributes:
+      label: 复现步骤
+      description: 尽量给出从空目录开始的最小命令序列。
+      placeholder: |
+        1. `dystill init`
+        2. 编辑 config.yaml ...
+        3. 运行 `dystill run ...`
+    validations:
+      required: true
+
+  - type: textarea
+    id: expected
+    attributes:
+      label: 期望结果
+    validations:
+      required: true
+
+  - type: textarea
+    id: actual
+    attributes:
+      label: 实际结果与报错
+      description: 贴完整 traceback 或日志。**粘贴前请把 key、cookie、绝对路径替换成占位符。**
+      render: text
+    validations:
+      required: true
+
+  - type: textarea
+    id: extra
+    attributes:
+      label: 补充信息（可选）
+      description: 是否使用了 `--no-*` 开关、是否走了 B 站/浏览器兜底、是否本地 STT 等。
+    validations:
+      required: false

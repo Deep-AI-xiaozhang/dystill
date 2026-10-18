@@ -1,0 +1,28 @@
+# sdist 内容清单。wheel 由 setuptools 按 [tool.setuptools.package-data] 打包包内文件。
+include LICENSE
+include README.md
+include CONTRIBUTING.md
+include SECURITY.md
+include THIRD_PARTY_NOTICES.md
+include config.example.yaml
+include pyproject.toml
+include MANIFEST.in
+
+# 包内配置模板：cli init 依赖它，缺了 wheel/sdist 里就没有模板
+recursive-include src/distill_workshop *.yaml
+
+# 测试随 sdist 发布，方便下游发行版打包时跑一遍
+recursive-include tests *.py
+
+# 内部/本地产物绝不进 sdist（config.yaml 含密钥、data/cache 含用户内容）
+prune data
+prune cache
+prune bench
+prune external
+prune output
+prune outputs
+prune notes
+prune build
+prune dist
+
+global-exclude *.py[cod] __pycache__ *.so *.dll *.dylib *.pyd

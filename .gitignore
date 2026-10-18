@@ -1,0 +1,67 @@
+# 凭据与私有配置（红线：永不入库）
+config.yaml
+config.yaml.bak*
+.env
+*.key
+*_key.txt
+*_token.txt
+openrouter_key.txt
+
+# 本地产物
+notes/
+data/
+cache/
+output/
+outputs/
+# 基准集与标注脚本：含笔记原文（个人内容），不入库
+# 注意：.gitignore 不支持行尾注释，注释必须单独一行，否则整行会被当成匹配模式
+# 注意：不能写 bench/ —— 目录被排除后 git 不再进入，下面的 ! 放行会失效。改用 bench/*。
+bench/*
+
+# 第三方 checkout（douyin-downloader 自带 .git，MIT/jiji262）：不进本仓库，按 README 自行拉取
+external/
+
+# Agent 工具的临时目录
+.box-agent/
+.box-agent-scratch/
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+.venv-*/
+build/
+dist/
+.pytest_cache/
+.ruff_cache/
+
+# IDE / OS
+.idea/
+.vscode/
+Thumbs.db
+.DS_Store
+
+# 下载器登录态配置（指向 cookie 文件；此文件本身也别入库）
+downloader.base.yml
+cache/config/cookies.json
+
+# 本地触发的回归脚本与结果（_ 前缀 = 本机临时物，永不入库）
+_*.bat
+_*.log
+_pytest_result.txt
+_git_result.txt
+_run_result.txt
+_bench_result.txt
+# _ 前缀的本地目录（备份、回放产物等临时物）
+_*/
+
+# 项目计划书备份：含私有流水线路径等个人内容，永不入库
+# 注意：文件曾用名「蒸馏功坊」，改名后是「蒸馏工坊」，所以用通配而不是固定前缀
+*项目计划书*.md
+
+# 内部验收文档与临时测试产物，永不入库
+F4_*.md
+URGENT_*.md
+test*.log
+test*.txt

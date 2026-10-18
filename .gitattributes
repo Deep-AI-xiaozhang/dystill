@@ -1,0 +1,15 @@
+# 统一换行：仓库内存 LF，Windows 检出时可自动转换
+* text=auto eol=lf
+
+# 明确按二进制处理
+*.png binary
+*.jpg binary
+*.jpeg binary
+*.gif binary
+*.wav binary
+*.mp4 binary
+*.whl binary
+
+# GitHub 语言统计：文档不计入
+*.md linguist-documentation
+docs/** linguist-documentation

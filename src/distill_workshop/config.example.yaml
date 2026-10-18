@@ -1,0 +1,81 @@
+# 蒸馏工坊 · 配置模板
+# 用法：复制为 config.yaml 后按需修改；${VAR} 会自动读环境变量。
+# 最小配置 = 下面 providers 里填 1 个带视觉能力的对话模型（key + api_base + model），其余全部可留默认。
+
+workspace:
+  # 三目录各归各位（三目录各归各位，路径全部可配，代码中禁止硬编码盘符）
+  notes_dir: ""     # 笔记输出（相对路径相对 root；默认 <root>/notes）
+  data_dir: ""      # 素材归档（相对路径相对 root；默认 <root>/data）
+  cache_dir: ""     # 工作缓存（相对路径相对 root；默认 <root>/cache）
+
+# OpenAI 兼容接口列表：按顺序降级。核心纪律：HTTP 200 但 content 为空 = 失败，必须换下家。
+# 可以混搭：判定/写笔记用一个快的文本模型，画面理解用带视觉的那个（各自标好 vision）。
+providers:
+  - name: main
+    api_base: ${DISTILL_API_BASE}   # 例：https://api.agnes-ai.cn/v1（AgnesAI，免费）
+    api_key: ${DISTILL_API_KEY}     # 建议 export DISTILL_API_KEY=sk-xxx，勿写进仓库
+    model: ""                       # 带视觉的对话模型（LLM+VLM+判定共用一个）
+    max_attempts: 3
+    vision: true                    # 能否读图；文本模型务必写 false
+    max_tokens: 0                   # 该模型的硬上限（0=不指定）。有些模型卡得很死，超一点就报
+                                    # "参数非法"，写在这里省得调用方记各家的怪癖
+    # extra_body:                   # 供应商专属请求参数，原样合并进请求体。常见用途：关思考链
+    #   reasoning_effort: none      # 思考型模型（回答前先长篇推理的那种）用它关掉思考，更快更省
+    #                               # token；档位取值按各家文档，常见为 low/medium/high/xhigh/none
+    #                               # ⚠️ 开思考档位时必须同时把上面的 max_tokens 调大（如 4096）：
+    #                               # 思考会先吃掉上千 token，额度不够就只剩空正文——会被当成调用失败
+    # api_key_file: "/path/to/your_key.txt"   # 也可从文件读 key，免得把密钥复制进本文件
+  # - name: judge                   # 可选：再挂一个模型专门跑核对判定（判定通道可与笔记通道分开）
+  #   api_base: ${JUDGE_API_BASE}   # 任何 OpenAI 兼容接口
+  #   api_key: ${JUDGE_API_KEY}
+  #   model: ""
+  #   max_attempts: 2
+  #   vision: false                 # 纯文本判定通道，务必标 false
+
+# 实测过的免费通道（**全流程可以完全不花钱**，推荐这样配）：
+#   硅基流动  deepseek-ai/DeepSeek-V4-Flash  2.5s  判定质量最好（实测 83.8%）← 推荐做判定/写笔记
+#   AgnesAI   agnes-2.5-flash                1.3s  读图✅ 判定✅ ← 最快，推荐做画面理解
+#   AgnesAI   agnes-3.0-flash                1.2s  读图✅ 判定✅（更新的一代）
+#   魔搭      deepseek-ai/DeepSeek-V4.1-Flash 3.1s 判定✅（备选）
+# 换模型请用 scripts/vlm_probe.py + scripts/model_pick.py 实测，别看榜单。
+#
+# 推荐配法（判定质量与画面理解分工，全部免费）：
+#   providers 第 1 个 = 硅基流动 DeepSeek-V4-Flash（vision: false，负责写笔记 + 判定）
+#   providers 第 2 个 = AgnesAI agnes-2.5-flash（vision: true，负责画面理解）
+#   pipeline.judge_provider = "siliconflow,agnes-2.5"（跨供应商降级链，防单家限流）
+
+# 抖音下载层（可选；只处理抖音链接时需要，本地文件 / B 站不需要）。
+# 用 `python scripts/setup_downloader.py` 拉取第三方 checkout（MIT, jiji262）后，
+# 把脚本打印的这两行填进来。不填也不会崩：抖音链接会给出可行动的配置提示。
+# 注意：external/ 已在 .gitignore，下载器本身不进仓库；这里只存路径，不存任何 cookie。
+download:
+  downloader_dir: ""        # 含 run.py 的目录；例："<仓库>/external/douyin-downloader"
+  config_yml: ""            # 下载器自己的 config.yml（继承 cookies/proxy）；留空用其默认
+
+stt:
+  backend: faster-whisper   # 默认本地，自动下载模型，无需 key
+  model: small              # small（默认，~500MB）/ large-v3-turbo（进阶）
+  device: auto              # auto（有 CUDA 就用）/ cuda / cpu
+  compute_type: ""          # 空 = 自动（CUDA→float16，CPU→int8）。
+                            # ⚠️ 别写 int8_float16：该量化实测会静默丢整段内容（DECISIONS D38）
+
+pipeline:
+  vlm_max_frames: 48        # 最多取多少帧送画面理解
+  vlm_batch_frames: 1       # 每次请求送几帧。**默认 1（逐帧）是实测结论，别随意调大**：
+                            # 一次塞多帧会被单次 max_tokens 截断、块间信息互相稀释，
+                            # 且一帧失败=整条画面维度全丢（理由见 docs/DECISIONS.md D7）
+  workers: 2                # 画面理解并发路数：质量优先 2 / 速度优先 4（免费通道调大易 429）
+  check_batch_delay: 0      # 核对判定每批之间的间隔秒数；免费/低配额通道遇 429 时调大（如 5）
+  check_max_claims: 0       # 单篇最多核对多少条声明（0=用模式默认：fast 40 / standard 120）
+  cache_keep_days: 7        # 中间产物保留天数：超过的在下次 run 时自动清理（0=不清理）。
+                            # 管两类：① 下载的媒体（cache/dl/）；② 每条记录的
+                            # 转写 / 画面理解 / 切帧 / 核对报告 / 身份信息。
+                            # 都可再生（重跑会重新下载 + 重新转写）。
+                            # **最终每个记录目录只剩 note.md**——本工具的产物就是一份笔记。
+  # check_l1_disambiguate: false  # L1 要不要用模型把声明改写自足/拆成多条（默认关）。
+  #                         # 开了会改写声明集合 ⇒ 基准集不再与历史数字可比，所以默认关；
+  #                         # 开启前请先用同日对照跑一次探针（见 docs/DECISIONS.md D24）。
+  #                         # 它用通用链（与笔记生成同一条），不受 judge_provider 影响。
+  # judge_provider: ""      # 核对判定专用通道（填 providers 里的 name，**逗号分隔多个 = 判定专用降级链**）。
+  #                         # 判定质量与笔记生成可以分开：实测（D21）同证据下强弱模型判定可差 13pp；
+  #                         # 且免费通道有日级降级窗口，判定链至少两家不同供应商互为备份。留空 = 共用主链
