@@ -10,7 +10,7 @@
 - 本地 STT 需要可选依赖 `faster-whisper`；B 站分流需要 `yt-dlp`；抖音浏览器兜底需要 `playwright`
 
 ```bash
-git clone https://github.com/zhj-521-521/dystill.git
+git clone https://github.com/Deep-AI-xiaozhang/dystill.git
 cd dystill
 
 python -m venv .venv

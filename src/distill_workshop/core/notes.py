@@ -207,8 +207,14 @@ def clean_title(stem: str) -> str:
 
 
 def safe_title(s: str) -> str:
+    """清掉文件名非法字符，并截到 60 字。
+
+    60 而不是 30：标题只写进 frontmatter 与 H1，不参与文件名，30 字经常把
+    抖音那种一长串的标题砍在半句话上（实测「Vibe知识大赏 科普视频零基础制作
+    教程 最近“Vibe知识…」。60 字能放下绝大多数完整标题，仍留了截断保护。
+    """
     s = re.sub(r'[\\/:*?"<>|\r\n]+', "", s).strip()
-    return s[:30] or "未命名"
+    return s[:60] or "未命名"
 
 
 def default_note_fn(app: AppConfig, on_step=None):

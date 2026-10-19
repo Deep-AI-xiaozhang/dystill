@@ -63,11 +63,10 @@ douyin-browser = ["playwright>=1.40"]
 dev = ["pytest>=8", "ruff>=0.6", "build>=1.2", "twine>=5"]
 
 [project.urls]
-# 发布前必须把 OWNER 换成真实 GitHub 账号/组织名；Homepage 与 Repository 不能留占位符上 PyPI。
-Homepage = "https://github.com/zhj-521-521/dystill"
-Repository = "https://github.com/zhj-521-521/dystill"
-Issues = "https://github.com/zhj-521-521/dystill/issues"
-Changelog = "https://github.com/zhj-521-521/dystill/releases"
+Homepage = "https://github.com/Deep-AI-xiaozhang/dystill"
+Repository = "https://github.com/Deep-AI-xiaozhang/dystill"
+Issues = "https://github.com/Deep-AI-xiaozhang/dystill/issues"
+Changelog = "https://github.com/Deep-AI-xiaozhang/dystill/releases"
 
 [project.scripts]
 dystill = "distill_workshop.cli:main"

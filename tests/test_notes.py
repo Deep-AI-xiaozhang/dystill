@@ -6,8 +6,10 @@ from distill_workshop.core.notes import (
     build_prompt,
     check_note_quality,
     chunk_text,
+    clean_title,
     default_note_fn,
     generate_note,
+    safe_title,
 )
 
 GOOD_NOTE = """# 蒸馏笔记 · 测试视频
@@ -62,6 +64,33 @@ def test_check_note_quality_truncation():
     emo = "# 蒸馏笔记 · 情绪\n\n> 类型：情绪内容\n\n## 这个视频是啥\n某人晒收益。\n"
     assert any("截断" in p for p in check_note_quality(emo))  # 缺第四板块
     assert any("结论先行" in p for p in check_note_quality(emo))  # 结构跑偏
+
+
+def test_safe_title_keeps_full_douyin_title():
+    """标题只进 frontmatter/H1，不进文件名，所以不该在 30 字处砍断。
+
+    实测抖音标题常是一长串（带话题标签），30 字会砍在半句话上。
+    """
+    long_title = "Vibe知识大赏 科普视频零基础制作教程 最近Vibe知识大赏在抖音特别火没有配音只靠画面字幕和音乐"
+    got = safe_title(long_title)
+    assert len(got) > 30, "标题不该再被砍到 30 字"
+    assert got.startswith("Vibe知识大赏 科普视频零基础制作教程")
+    assert len(got) <= 60
+
+    # 超长仍要截断（保护 frontmatter 与 H1 不被异常长的标题撑爆）
+    assert len(safe_title("字" * 200)) == 60
+
+    # 非法字符仍要清掉（曾经写进文件名，现在只是保持干净的文本）
+    assert safe_title('a/b:c*d?"e<f>g|h') == "abcdefgh"
+
+    # 空标题的兜底不变
+    assert safe_title("   ") == "未命名"
+
+
+def test_clean_title_strips_douyin_prefix():
+    """下载文件名前缀（日期 / BV 号 / 尾部 aweme id）不该进笔记标题。"""
+    assert clean_title("2026-10-15_Vibe知识大赏 科普视频_7696887478174616875") == "Vibe知识大赏 科普视频"
+    assert clean_title("BV1xx411c7mD_某个B站视频") == "某个B站视频"
 
 
 def test_prompt_is_pure_knowledge_template():
