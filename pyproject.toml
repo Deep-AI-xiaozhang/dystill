@@ -7,7 +7,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "dystill"
 version = "0.1.0"
-description = "把视频变成不会瞎编的可回查笔记：每条结论回原片找出处并附时间戳（抖音优先，本地优先）"
+description = "视频转笔记｜视频转文字：把视频变成不会瞎编的可回查笔记，每条结论回原片找出处并附时间戳（抖音优先、本地优先、Whisper 转写、支持任何 OpenAI 兼容模型）"
 readme = "README.md"
 license = "MIT"
 license-files = ["LICENSE"]
