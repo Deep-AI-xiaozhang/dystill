@@ -7,7 +7,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "dystill"
 version = "0.1.0"
-description = "蒸馏工坊：抖音优先、带笔记级事实核对（不瞎编、可回查）的本地视频蒸馏工具"
+description = "把视频变成不会瞎编的可回查笔记：每条结论回原片找出处并附时间戳（抖音优先，本地优先）"
 readme = "README.md"
 license = "MIT"
 license-files = ["LICENSE"]
