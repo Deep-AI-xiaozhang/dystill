@@ -114,6 +114,24 @@ def _known_keys(cls, raw: dict | None) -> dict:
     return {k: v for k, v in (raw or {}).items() if k in cls.__dataclass_fields__}
 
 
+def resolve_relative(value: str, root: Path) -> str:
+    """把配置里的相对路径解析成绝对路径（相对 root，即 config.yaml 所在目录/root 设定）。
+
+    为什么必须做（实测 2026-11-04）：`download.downloader_dir: external/douyin-downloader`
+    是相对写法，从 `docs/` 子目录跑 `dystill doctor` 时被当成相对**当前工作目录**，
+    报「配置目录不存在」；`api_key_file` 同理。配置文件的相对路径本来就该相对配置本身，
+    不该随用户在哪个目录敲命令而漂移。
+    空值原样返回（空 = 未配置）；绝对路径原样返回。
+    """
+    raw = str(value or "").strip()
+    if not raw:
+        return ""
+    p = Path(raw).expanduser()
+    if p.is_absolute():
+        return str(p)
+    return str((root / p).resolve())
+
+
 def load_config(start: Path | None = None) -> AppConfig:
     cfg_path = find_config_file(start)
     raw: dict = {}
@@ -141,6 +159,9 @@ def load_config(start: Path | None = None) -> AppConfig:
         # dataclass 构造会直接 TypeError 把整个工具打崩（实测踩到）。未知键丢弃而不是报错——
         # 配置的目的是\"能跑\"，多写一个没用的键不该让工具没法启动。
         known = {k: v for k, v in p.items() if k in ProviderConfig.__dataclass_fields__}
+        # key 文件路径也相对配置文件解析，否则换个目录敲命令就读不到 key
+        if known.get("api_key_file"):
+            known["api_key_file"] = resolve_relative(known["api_key_file"], root)
         providers.append(ProviderConfig(**{"name": "main", "max_attempts": 3, **known}))
     # key 文件在加载时就解析成 api_key：下游只认 api_key，不必各自记住"有的家 key 在文件里"
     for p in providers:
@@ -157,8 +178,14 @@ def load_config(start: Path | None = None) -> AppConfig:
     stt = STTConfig(**{"backend": "faster-whisper", "model": "small",
                        **_known_keys(STTConfig, raw.get("stt"))})
 
+    # 下载层的两个路径同理：相对写法按配置文件解析，不按当前工作目录
+    dcfg = _known_keys(DownloadConfig, raw.get("download"))
+    for key in ("downloader_dir", "config_yml"):
+        if dcfg.get(key):
+            dcfg[key] = resolve_relative(dcfg[key], root)
+
     return AppConfig(
         root=root, notes_dir=notes, data_dir=data, cache_dir=cache,
         providers=providers, stt=stt, pipeline=raw.get("pipeline") or {},
-        download=DownloadConfig(**_known_keys(DownloadConfig, raw.get("download"))),
+        download=DownloadConfig(**dcfg),
     )

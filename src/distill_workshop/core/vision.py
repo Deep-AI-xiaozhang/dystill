@@ -103,12 +103,34 @@ def _fallback_single_frame(video: Path, frames_dir: Path) -> list[Path]:
     return [out] if out.exists() else []
 
 
+def narrow_timecodes(frames_dir: Path, kept: list[Path]) -> None:
+    """把 timecodes.json 收窄到 `kept` 这几帧。
+
+    帧集合一旦被重采样（上限调小、去重），时间轴必须同步收窄：核对报告靠它把
+    「第 N 张图」映射回原片秒数。留着一份全量时间轴，下游按序号取第 N 条就会
+    指到别的帧上——实测 001/004/007/010 四帧被报成 10/20/30/40 秒，真实是 10/40/70/100。
+    """
+    tc_path = Path(frames_dir) / "timecodes.json"
+    tc = src_timecodes(frames_dir)
+    if not tc:
+        return
+    narrowed = {p.name: tc[p.name] for p in kept if p.name in tc}
+    if narrowed and narrowed != tc:
+        tc_path.write_text(json.dumps(narrowed, ensure_ascii=False), encoding="utf-8")
+
+
 def step_scenes(video: Path, frames_dir: Path, max_frames: int = 48) -> list[Path]:
     """切镜头 → 每场景 1 帧（720p）→ 滑窗去重 → 上限重采样 → timecodes.json。"""
     video, frames_dir = Path(video), Path(frames_dir)
     frames_dir.mkdir(parents=True, exist_ok=True)
     cached = sorted(frames_dir.glob("*.jpg"))
     if cached:  # 断点续跑：帧缓存命中直接复用
+        # 配置可能从 48 改小到 16：缓存里有更多帧时也要遵守当前上限，
+        # 否则“改小上限”在续跑时完全无效，会继续把几十帧全送去 VLM。
+        if len(cached) > max_frames:
+            kept = [cached[i] for i in resample_indices(len(cached), max_frames)]
+            narrow_timecodes(frames_dir, kept)
+            return kept
         return cached
 
     raw = frames_dir / "_raw"
@@ -194,6 +216,9 @@ def keep_note_frames(frames: list[Path], out_dir: Path, max_n: int = 5) -> list[
         if remap:
             (out_dir / "timecodes.json").write_text(
                 json.dumps(remap, ensure_ascii=False), encoding="utf-8")
+    # 源目录的帧集合没被重采样时，时间轴与文件本来就一一对应；重采样过（上限调小后
+    # 重跑）则可能还留着全量条目——顺带收窄，免得下次续跑又按错的序号取时间。
+    narrow_timecodes(frames[0].parent, frames)
     return result
 
 

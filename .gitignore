@@ -65,3 +65,6 @@ F4_*.md
 URGENT_*.md
 test*.log
 test*.txt
+
+# uv 锁文件（本仓库用 pip/pyproject 管理依赖，不锁版本；本地跑 uv 时别入库）
+uv.lock

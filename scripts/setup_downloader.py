@@ -19,6 +19,7 @@ from __future__ import annotations
 import argparse
 import shutil
 import subprocess
+import sys
 from pathlib import Path
 
 REPO = "https://github.com/jiji262/douyin-downloader"
@@ -26,7 +27,42 @@ PROXY = "https://gh-proxy.com/"          # 国内常见加速前缀；换镜像�
 DEFAULT_DEST = Path(__file__).resolve().parents[1] / "external" / "douyin-downloader"
 
 
+def _install_requirements(dest: Path) -> int:
+    """安装下载器自己的依赖；它和 dystill 本体是两个 Python 项目。
+
+    只 clone 不装依赖时，首次下载会报 `ModuleNotFoundError: rich`，用户看到的
+    却是“抖音下载失败”。这里主动把依赖补齐，避免把环境问题伪装成平台问题。
+    优先用 uv（本仓库常用环境没有 pip），没有 uv 再回退到 pip。
+    """
+    req = dest / "requirements.txt"
+    if not req.is_file():
+        print(f"[!] 没找到下载器依赖清单：{req}")
+        return 0
+    if shutil.which("uv"):
+        cmd = ["uv", "pip", "install", "--python", sys.executable, "-r", str(req)]
+    else:
+        cmd = [sys.executable, "-m", "pip", "install", "-r", str(req)]
+    print(f"[*] 安装下载器依赖：{' '.join(cmd[:4])} ...")
+    try:
+        r = subprocess.run(cmd, check=False, timeout=900)
+    except subprocess.TimeoutExpired:
+        print("[x] 下载器依赖安装超时（900s）。可重跑本脚本，或手动执行：")
+        print(f"    {' '.join(cmd)}")
+        return 1
+    if r.returncode != 0:
+        print("[x] 下载器依赖安装失败。可手动执行：")
+        print(f"    {' '.join(cmd)}")
+        return 1
+    print("[✓] 下载器依赖已安装")
+    return 0
+
+
 def main() -> int:
+    # Windows 控制台默认可能是 GBK；脚本里的对勾等字符会让 print 直接抛
+    # UnicodeEncodeError，进而把“安装成功”误报成失败。
+    for stream in (sys.stdout, sys.stderr):
+        if hasattr(stream, "reconfigure"):
+            stream.reconfigure(encoding="utf-8", errors="replace")
     ap = argparse.ArgumentParser(description="拉取 douyin-downloader 到 external/（不入 git）")
     ap.add_argument("--dest", default=str(DEFAULT_DEST), help="目标目录（默认 <repo>/external/douyin-downloader）")
     ap.add_argument("--direct", action="store_true", help="直连 GitHub（不走加速前缀）")
@@ -39,6 +75,8 @@ def main() -> int:
         return 2
     if (dest / ".git").is_dir():
         print(f"[=] 已经在了：{dest}")
+        if _install_requirements(dest) != 0:
+            return 1
         print("    想更新就进去 git pull；下面是配置片段（不变）")
         return _print_config(dest)
     if dest.exists() and any(dest.iterdir()):
@@ -62,6 +100,8 @@ def main() -> int:
         return 1
     if not (dest / "run.py").is_file():
         print(f"[!] 克隆完成但没看到 run.py，请确认上游结构是否变了：{dest}")
+    if _install_requirements(dest) != 0:
+        return 1
     print(f"[✓] 下载层就位：{dest}")
     return _print_config(dest)
 

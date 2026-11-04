@@ -15,7 +15,14 @@ from .models import (
     Evidence,
 )
 from .modes import MODES, CheckMode, get_mode
-from .report import BOUNDARY, badge, build_json, render_markdown, write_reports
+from .report import (
+    BOUNDARY,
+    badge,
+    build_json,
+    render_html,
+    render_markdown,
+    write_reports,
+)
 
 __all__ = [
     "BOUNDARY",
@@ -34,6 +41,7 @@ __all__ = [
     "build_json",
     "find_note",
     "get_mode",
+    "render_html",
     "render_markdown",
     "resolve_record_dir",
     "run_check",

@@ -19,7 +19,8 @@ from pathlib import Path
 
 from ..config import AppConfig
 from ..providers.llm import chat
-from .artifacts import read_if_valid, write_if_valid
+from .artifacts import QUALITY_WARNING_MARKER, read_if_valid, write_if_valid
+from .frontmatter import yaml_scalar
 
 TRANSCRIPT_CHUNK_CHARS = 4000
 TRANSCRIPT_CHUNK_MAX = 8
@@ -62,6 +63,7 @@ def build_prompt(title_hint: str, transcript: str, vlm_text: str,
 【不许把推测写成事实】作者在视频里**猜的、问的、说"可能"的**，笔记里必须保持"这是推测"的语气，不能写成确定结论（实测踩到：作者说"这有没有一种可能是更多的搜索流量，或者说是收藏"，笔记写成了"新评估维度包括 7 天后的搜索/收藏流量占比"——把疑问变成了确定事实，核对判不一致）。
 - 原话有"可能/也许/大概/我猜/是不是/有没有一种可能是"这类词时，笔记里保留"作者推测""可能是"的措辞。
 - 不要替作者把话说满：他问"是不是"，你就写"作者猜测是不是"，别写"就是"。
+- **不要擅自升级判断强度**：原话是"大概是假/还要点进去认证/还需要确认"，不能写成"直接判断为假""直接确认""一眼假就是定论"。
 
 【画面字段照抄，不要漏、不要改写】画面理解里的**分类名、字段名、按钮名、进度数字**是硬证据，必须原样保留（实测踩到两类错）：
 - **不要改写专有名词**：画面写"落库池·连接"，就不能写成"落库池·连板"；画面写"题材·问答"，就不能加字成"现题材·问答"。
@@ -195,11 +197,16 @@ def generate_note(transcript: str, vlm_text: str, title_hint: str, app: AppConfi
             return note
         if on_step:
             on_step(f"   初稿自检不通过：{'；'.join(problems)}（第 {attempt + 1} 版，将重试）")
-    return note + "\n\n---\n> ⚠️ 初稿质量自检未通过（" + "；".join(problems) + "），需人工校对补深度\n"
+    return (note + f"\n\n---\n> ⚠️ {QUALITY_WARNING_MARKER}（" + "；".join(problems)
+            + "），需人工校对补深度\n")
 
 
 def clean_title(stem: str) -> str:
-    """从下载文件名提取主题：去抖音日期前缀/BV号前缀/尾部 aweme id（早期实现）。"""
+    """从下载文件名提取主题：去日期前缀 / BV 号前缀 / 尾部 aweme id（早期实现）。
+
+    BV 号前缀保留：B 站分流已移除（D57），但历史记录里的文件名仍可能是那个形状，
+    剥不掉会让旧笔记的标题带着 `BV1xx411c7mD_` 前缀。
+    """
     s = re.sub(r"^\d{4}-\d{2}-\d{2}_", "", stem)
     s = re.sub(r"^(BV[0-9A-Za-z]{8,12})_", "", s)
     s = re.sub(r"_\d{15,20}$", "", s)
@@ -238,7 +245,8 @@ def default_note_fn(app: AppConfig, on_step=None):
         if on_step:
             on_step(f"   标题：{title_hint}")
         note = generate_note(transcript, vlm, title_hint, app_, on_step=log)
-        fm = (f"---\ntitle: {title_hint}\nkey: {artifacts.get('key', '')}\n"
-              f"source: {artifacts.get('source', '')}\ndate: {time.strftime('%Y-%m-%d')}\n---\n")
+        fm = (f"---\ntitle: {yaml_scalar(title_hint)}\nkey: {yaml_scalar(artifacts.get('key', ''))}\n"
+              f"source: {yaml_scalar(artifacts.get('source', ''))}\n"
+              f"date: {time.strftime('%Y-%m-%d')}\n---\n")
         write_if_valid(rd / "note.md", fm + note, "note")
     return fn

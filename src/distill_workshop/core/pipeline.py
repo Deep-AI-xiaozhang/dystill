@@ -17,7 +17,7 @@ from pathlib import Path
 from ..config import AppConfig
 from ..identity import content_fingerprint, record_key
 from . import ledger
-from .artifacts import read_if_valid, record_dir, write_if_valid
+from .artifacts import read_if_valid, read_note_if_complete, record_dir, write_if_valid
 from .download import GalleryDetected, aweme_id_from_url, step_download
 from .media import detect_source, is_audio_file
 from .stt import BaseSTT, step_transcribe
@@ -44,12 +44,12 @@ def resolve_key(url_or_path: str) -> tuple[str, str]:
         if not aweme:
             raise ValueError(f"无法从链接解析 aweme_id（短链展开失败或非视频页）: {url_or_path}")
         return record_key(aweme_id=aweme), src
-    if src == "bilibili":
-        # B站无 aweme_id，用URL哈希做临时键，下载后再用文件指纹
-        import hashlib
-        fp_hash = hashlib.sha256(url_or_path.encode()).hexdigest()
-        return record_key(fingerprint=fp_hash), src
-    raise ValueError(f"不支持的平台: {url_or_path}（source={src}）")
+    # 只有抖音链接 + 本地文件两种输入（D57）。别的平台链接在这里就拦住，
+    # 免得先下下来再说"不支持"。
+    raise ValueError(
+        f"不支持的输入: {url_or_path}（source={src}）\n"
+        f"本工具只做抖音链接 + 本地视频/音频/图文文件"
+    )
 
 
 def _default_vlm(frames: list[Path], app: AppConfig, on_step: Callable) -> str:
@@ -101,17 +101,24 @@ def _process_gallery(url_or_path: str, app: AppConfig, out: Path, artifacts: dic
     if not images:
         raise RuntimeError("识别为图文帖，但没拿到任何图片（下载器可能没开图片下载）")
     _log(on_step, f"🖼️ 图文帖：{len(images)} 张图，跳过转写与切帧")
-    artifacts.update(media_type="gallery", images=[str(p) for p in images])
+    # 笔记层用 media 推导标题，用 key/source 写 frontmatter；图文帖没有视频文件，
+    # 这里用第一张图作为身份素材，避免生成 key 为空的“未命名”笔记。
+    artifacts.update(media_type="gallery", images=[str(p) for p in images],
+                     media=str(images[0]))
 
-    vlm_text = (vlm_fn or _gallery_vlm)(images, app, on_step)
-    if not write_if_valid(out / "vlm.txt", vlm_text, "vlm"):
-        raise RuntimeError("图片理解结果无效，拒绝生成成功记录")
+    vlm_text = read_if_valid(out / "vlm.txt", "vlm")
+    if vlm_text is None:
+        vlm_text = (vlm_fn or _gallery_vlm)(images, app, on_step)
+        if not write_if_valid(out / "vlm.txt", vlm_text, "vlm"):
+            raise RuntimeError("图片理解结果无效，拒绝生成成功记录")
+    else:
+        _log(on_step, "♻️ 图片理解已存在且有效，跳过重复调用")
     artifacts["vlm"] = str(out / "vlm.txt")
 
     if note_fn:
         _log(on_step, "⑤ 生成笔记...")
         note_fn(out, artifacts, app, on_step)
-        if read_if_valid(out / "note.md", "note") is None:
+        if read_note_if_complete(out / "note.md") is None:
             raise RuntimeError("笔记生成失败或结果无效，拒绝生成成功记录")
         artifacts["note"] = str(out / "note.md")
 
@@ -146,7 +153,7 @@ def process_record(url_or_path: str, app: AppConfig, *,
     _log(on_step, f"身份键: {key}（{source}）→ {out.name}")
 
     # 断点续跑：笔记已存在且有效 → 整条跳过
-    if note_fn and read_if_valid(out / "note.md", "note"):
+    if note_fn and read_note_if_complete(out / "note.md"):
         _log(on_step, "⏭️ 笔记已存在且有效，跳过（断点续跑）")
         ledger.append_event(app, {"key": key, "event": "skip", "ok": True, "seconds": 0})
         artifacts.update(status="skipped")
@@ -158,7 +165,7 @@ def process_record(url_or_path: str, app: AppConfig, *,
         media = p
         _log(on_step, f"① 本地文件，跳过下载（{p.name}）")
     else:
-        _log(on_step, "① 下载中（douyin-downloader / yt-dlp）...")
+        _log(on_step, "① 下载中（douyin-downloader）...")
         try:
             media = step_download(url_or_path, app, on_step=on_step)
         except GalleryDetected as e:
@@ -185,9 +192,13 @@ def process_record(url_or_path: str, app: AppConfig, *,
         max_frames = int(app.pipeline.get("vlm_max_frames", 48))
         frames = (scenes_fn or step_scenes)(media, out / "frames", max_frames)
         _log(on_step, f"   切出 {len(frames)} 帧")
-        vlm_text = (vlm_fn or _default_vlm)(frames, app, on_step)
-        if not write_if_valid(out / "vlm.txt", vlm_text, "vlm"):
-            raise RuntimeError("画面理解结果无效，拒绝生成成功记录")
+        vlm_text = read_if_valid(out / "vlm.txt", "vlm")
+        if vlm_text is None:
+            vlm_text = (vlm_fn or _default_vlm)(frames, app, on_step)
+            if not write_if_valid(out / "vlm.txt", vlm_text, "vlm"):
+                raise RuntimeError("画面理解结果无效，拒绝生成成功记录")
+        else:
+            _log(on_step, "♻️ 画面理解已存在且有效，跳过重复调用")
         artifacts["frames"] = [str(f) for f in frames]
     artifacts["vlm"] = str(out / "vlm.txt")
 
@@ -195,7 +206,7 @@ def process_record(url_or_path: str, app: AppConfig, *,
     if note_fn:
         _log(on_step, "⑤ 生成笔记...")
         note_fn(out, artifacts, app, on_step)
-        if read_if_valid(out / "note.md", "note") is None:
+        if read_note_if_complete(out / "note.md") is None:
             raise RuntimeError("笔记生成失败或结果无效，拒绝生成成功记录")
         artifacts["note"] = str(out / "note.md")
 

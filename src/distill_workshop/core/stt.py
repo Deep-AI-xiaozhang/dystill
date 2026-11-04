@@ -17,6 +17,10 @@ from .media import media_duration
 _NO_WINDOW = getattr(subprocess, "CREATE_NO_WINDOW", 0)
 _SEGMENT_SECONDS = 600          # 10min 一段
 _LONG_THRESHOLD = 900           # >15min 才分段（实测 15min 内整段更稳）
+_CUDA_RUNTIME_HINTS = (
+    "cublas", "cudnn", "cuda", "gpu", "no kernel image",
+    "cannot be loaded", "could not load",
+)
 
 
 class BaseSTT(ABC):
@@ -66,22 +70,45 @@ class FasterWhisperSTT(BaseSTT):
         self.device = device
         self.compute_type = compute_type
         self._model = None
+        self._active_device = ""
+        self.last_fallback = ""
+
+    def _make_model(self, device: str, compute: str):
+        from faster_whisper import WhisperModel  # 延迟导入：未安装时给出明确报错
+        return WhisperModel(self.model_size, device=device, compute_type=compute)
+
+    def _use_device(self, device: str, compute: str) -> None:
+        self._active_device = device
+        self._model = self._make_model(device, compute)
 
     def _ensure_model(self):
         if self._model is None:
-            from faster_whisper import WhisperModel  # 延迟导入：未安装时给出明确报错
             device, compute = resolve_device_compute(self.device, self.compute_type)
-            self._model = WhisperModel(self.model_size, device=device, compute_type=compute)
+            self._use_device(device, compute)
         return self._model
 
-    def transcribe_raw(self, wav: Path, vad_filter: bool = True) -> list[tuple[float, str]]:
+    def _transcribe(self, wav: Path, vad_filter: bool) -> list[tuple[float, str]]:
         model = self._ensure_model()
         segments, _info = model.transcribe(
             str(wav), vad_filter=vad_filter, language="zh",
             # 关掉上文条件：开着它模型会顺着上文"编"，是复读/幻觉的主要来源（同 D38）
             condition_on_previous_text=False,
         )
+        # 必须在这里消费生成器：CUDA 运行库错误可能在真正迭代 segments 时才抛出。
         return [(seg.start, seg.text.strip()) for seg in segments]
+
+    def transcribe_raw(self, wav: Path, vad_filter: bool = True) -> list[tuple[float, str]]:
+        try:
+            return self._transcribe(wav, vad_filter)
+        except Exception as e:
+            reason = str(e).lower()
+            auto_cuda = ((self.device or "auto").strip().lower() == "auto"
+                         and self._active_device == "cuda")
+            if auto_cuda and any(hint in reason for hint in _CUDA_RUNTIME_HINTS):
+                self.last_fallback = f"GPU 转写不可用（{type(e).__name__}: {e}），已自动改用 CPU"
+                self._use_device("cpu", "int8")
+                return self._transcribe(wav, vad_filter)
+            raise
 
 
 def _fmt_ts(seconds: float) -> str:

@@ -8,6 +8,7 @@ from __future__ import annotations
 import shutil
 import sys
 from importlib.util import find_spec
+from pathlib import Path
 
 from .config import load_config
 
@@ -26,8 +27,9 @@ def run_doctor(do_probe_calls: bool = False) -> dict:
     checks.append(_check(
         "providers", bool(providers),
         f"{len(providers)} 个可用（api_base+key+model 齐全）" if providers else "尚未配置模型供应商",
-        fix="复制 config.example.yaml 为 config.yaml，填一个带视觉能力的对话模型（key/api_base/model）；"
-            "或设置环境变量 DISTILL_API_BASE / DISTILL_API_KEY / DISTILL_MODEL 后运行 `dystill init`",
+        fix="运行 `dystill init` 生成 config.yaml，再填一个带视觉能力的对话模型"
+            "（key/api_base/model）；或设置环境变量 DISTILL_API_BASE / DISTILL_API_KEY / "
+            "DISTILL_MODEL",
         need_setup=not providers,
     ))
 
@@ -53,15 +55,24 @@ def run_doctor(do_probe_calls: bool = False) -> dict:
         ))
 
     # 3. STT 后端
+    # 目前只有 faster-whisper 一种实现。配了别的名字必须报错而不是报绿——
+    # 原实现写「云端，随 providers 走」+ status=ok，但 stt.py 里根本没有云端后端：
+    # doctor 说可以开跑，真跑起来 pipeline 会抛「未配置 STT 后端」（2026-11-04 复查发现）。
     if cfg.stt.backend == "faster-whisper":
         has_stt = find_spec("faster_whisper") is not None
         checks.append(_check(
             "stt(faster-whisper)", has_stt,
             "已安装" if has_stt else "未安装（首次转录将自动下载 small 模型 ~500MB）",
-            fix="pip install 'dystill[local-stt]' 或 pip install faster-whisper",
+            fix="pip install faster-whisper（源码安装也可用 pip install -e '.[local-stt]'）",
+            need_setup=not has_stt,
         ))
     else:
-        checks.append(_check("stt", True, f"backend={cfg.stt.backend}（云端，随 providers 走）"))
+        checks.append(_check(
+            "stt", False,
+            f"backend={cfg.stt.backend}：本工具目前只实现了 faster-whisper，没有云端转写后端",
+            fix="把 config.yaml 的 stt.backend 改回 faster-whisper（本地转写，不需要 key）",
+            need_setup=True,
+        ))
 
     # 3. ffmpeg（下载/切帧/分段转写依赖）
     has_ffmpeg = shutil.which("ffmpeg") is not None
@@ -69,6 +80,7 @@ def run_doctor(do_probe_calls: bool = False) -> dict:
         "ffmpeg", has_ffmpeg,
         shutil.which("ffmpeg") or "未找到",
         fix="安装 ffmpeg 并加入 PATH（winget install Gyan.FFmpeg / apt install ffmpeg）",
+        need_setup=not has_ffmpeg,
     ))
 
     # 4. 切帧依赖（scene 切镜头 + Pillow 缩放/感知哈希）——缺了不是"少个功能"，是"产物质量塌"
@@ -76,14 +88,35 @@ def run_doctor(do_probe_calls: bool = False) -> dict:
     checks.append(_check(
         "pillow", has_pil,
         "已安装" if has_pil else "未安装（切出帧后缩放/去重会直接报错）",
-        fix="pip install 'dystill' 重装（Pillow 已是本体依赖）；或 pip install Pillow",
+        fix="pip install Pillow（通常重装本体也会补上）",
+        need_setup=not has_pil,
     ))
     has_scene = find_spec("scenedetect") is not None
     checks.append(_check(
         "scenedetect", has_scene,
         "已安装（按镜头切帧）" if has_scene else "未安装（会退回整片抽 1 帧，画面理解质量大幅下降）",
-        fix="pip install 'dystill' 重装（scenedetect 已是本体依赖）；或 pip install scenedetect",
+        fix="pip install scenedetect（通常重装本体也会补上）",
+        need_setup=not has_scene,
     ))
+
+    # 4b. 抖音下载器自己的依赖（它不是本仓库的依赖，只 clone 不等于是可用）
+    if cfg.download.downloader_dir:
+        dd = Path(cfg.download.downloader_dir).expanduser()
+        mods = {
+            "aiohttp": "aiohttp", "aiofiles": "aiofiles", "aiosqlite": "aiosqlite",
+            "rich": "rich", "yaml": "pyyaml", "dateutil": "python-dateutil",
+            "gmssl": "gmssl", "imageio_ffmpeg": "imageio-ffmpeg",
+        }
+        missing = [pkg for mod, pkg in mods.items() if find_spec(mod) is None]
+        req = dd / "requirements.txt"
+        checks.append(_check(
+            "douyin-downloader", not missing and dd.is_dir(),
+            ("依赖齐全" if not missing else f"缺依赖：{', '.join(missing)}")
+            if dd.is_dir() else f"配置目录不存在：{dd}",
+            fix=(f"python scripts/setup_downloader.py（会自动安装 {req.name}）"
+                 if req.is_file() else "检查 download.downloader_dir 是否指向含 run.py 的目录"),
+            need_setup=True,
+        ))
 
     # 5. ollama（可选：完全离线模式的进阶依赖）
     # 进程内直接探测：起 `python -c` 子进程在只有 py 启动器的机器上会静默误报"未运行"
@@ -107,10 +140,9 @@ def run_doctor(do_probe_calls: bool = False) -> dict:
             checks.append(_check("provider_probe", False, f"实测失败：{e}",
                                  fix="检查 key 是否有效、api_base 是否正确"))
 
-    # 结论只看两项：providers 就绪 + 有带视觉的供应商（视频蒸馏主场景跑不跑得动）。
-    # 只查 providers 会假绿：唯一 provider 标了 vision: false 时画面理解必断（实测踩到）。
-    ok = all(c["status"] != "NEED_SETUP"
-             for c in checks if c["name"] in ("providers", "provider(vision)"))
+    # 必需项全部 OK 才算真的能开跑。只看模型会造成假绿：
+    # 模型配好了但 STT/ffmpeg 缺失时，第一条视频仍会失败（首次安装实测踩到）。
+    ok = all(c["status"] == "ok" for c in checks if not c["name"].endswith("(可选)"))
     return {"ok": ok, "need_setup": [c for c in checks if c["status"] == "NEED_SETUP"], "checks": checks}
 
 
@@ -125,7 +157,7 @@ def print_report(report: dict, as_json: bool = False) -> int:
             if c["status"] != "ok" and c.get("fix"):
                 print(f"   ↳ 怎么补：{c['fix']}")
         print("\n结论：" + ("可以开跑 ✅" if report["ok"] else
-              "还差配置 🔑 —— 把上面的 NEED_SETUP 补齐后重跑 dystill doctor"))
+              "还差必需配置/依赖 🔑 —— 按上面的提示补齐后重跑 dystill doctor"))
     return 0 if report["ok"] else 2
 
 

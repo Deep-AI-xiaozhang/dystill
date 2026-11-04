@@ -5,9 +5,16 @@ from pathlib import Path
 from distill_workshop.core.artifacts import (
     cache_media_files,
     cleanup_cache,
+    cleanup_evidence,
+    cleanup_orphan_materials,
+    cleanup_raw_material,
     cleanup_transcribe_scratch,
     is_stale_dir,
+    old_evidence,
+    orphan_material_dirs,
+    raw_material,
     read_if_valid,
+    read_note_if_complete,
     record_dir,
     strip_timestamps,
     transcribe_scratch,
@@ -29,6 +36,7 @@ def test_transcript_valid_accepts_real_content():
 
 def test_strip_timestamps():
     assert strip_timestamps("[00:15]你好[01:02:30]世界") == "你好世界"
+    assert strip_timestamps("[00:15-00:22]你好") == "你好"
 
 
 def test_write_if_valid_blocks_bad_artifact(tmp_path: Path):
@@ -136,3 +144,93 @@ def test_transcribe_scratch_only_when_transcript_valid(tmp_path: Path):
     assert not (rd / "audio.wav").exists()
     assert not seg.exists()                      # 空目录一并收掉
     assert (rd / "transcript.txt").exists()      # 成果不动
+
+
+def test_large_cleanup_keeps_text_evidence(tmp_path: Path):
+    """按保留期只清切帧；转写、画面理解、核对报告是回查依据，必须留下。"""
+    data = tmp_path / "data"
+    rd = data / "aweme_1"
+    frames = rd / "frames"
+    frames.mkdir(parents=True)
+    frame = frames / "001.jpg"
+    frame.write_bytes(b"x" * 100)
+    evidence_files = {
+        "transcript.txt": "有效转写" * 20,
+        "vlm.txt": "画面理解" * 20,
+        "check.md": "核对明细" * 20,
+        "check.json": "{}",
+        "check.html": "<html></html>",
+        "meta.json": "{}",
+    }
+    for name, text in evidence_files.items():
+        (rd / name).write_text(text, encoding="utf-8")
+        _age(rd / name, 30)
+    _age(frame, 30)
+
+    assert raw_material(rd, days=7) == [frames]
+    cleanup_raw_material(data, days=7, apply=True)
+    assert not frames.exists()
+    for name in evidence_files:
+        assert (rd / name).exists(), name
+
+
+def test_evidence_cleanup_is_explicit_and_respects_age(tmp_path: Path):
+    """文本证据只在显式清理时删除，且仍尊重保留天数。"""
+    data = tmp_path / "data"
+    old_dir = data / "aweme_old"
+    fresh_dir = data / "aweme_fresh"
+    old_dir.mkdir(parents=True)
+    fresh_dir.mkdir(parents=True)
+    old = old_dir / "transcript.txt"
+    fresh = fresh_dir / "transcript.txt"
+    old.write_text("旧证据", encoding="utf-8")
+    fresh.write_text("新证据", encoding="utf-8")
+    _age(old, 30)
+
+    assert old_evidence(old_dir, days=7) == [old]
+    cleanup_evidence(data, days=7, apply=False)
+    assert old.exists()                          # 默认只报告
+
+    assert cleanup_evidence(data, days=7, apply=True) == [old]
+    assert not old.exists()
+    assert fresh.exists()
+
+
+def test_orphan_material_cleanup_only_removes_old_noteless_records(tmp_path: Path):
+    data = tmp_path / "data"
+    orphan = data / "aweme_old"
+    fresh = data / "aweme_fresh"
+    completed = data / "aweme_done"
+    for d in (orphan, fresh, completed):
+        d.mkdir(parents=True)
+    old_transcript = orphan / "transcript.txt"
+    fresh_transcript = fresh / "transcript.txt"
+    done_transcript = completed / "transcript.txt"
+    for p in (old_transcript, fresh_transcript, done_transcript):
+        p.write_text("足够长的有效转写正文，用来证明这是有素材但没有成品的记录。" * 2,
+                     encoding="utf-8")
+    (completed / "note.md").write_text("# 已完成\n\n" + "正文" * 100, encoding="utf-8")
+    _age(old_transcript, 30)
+    _age(completed / "note.md", 30)
+
+    assert orphan_material_dirs(data, days=7) == [orphan]
+    cleanup_orphan_materials(data, days=7, apply=False)
+    assert orphan.exists()
+
+    assert cleanup_orphan_materials(data, days=7, apply=True) == [orphan]
+    assert not orphan.exists()
+    assert fresh.exists()
+    assert completed.exists()
+
+
+def test_quality_warning_note_is_readable_but_not_reusable(tmp_path: Path):
+    """保留坏稿供人工查看，但断点续跑必须把它当成未完成。"""
+    from distill_workshop.core.artifacts import QUALITY_WARNING_MARKER
+
+    note = "# 蒸馏笔记 · 测试\n\n" + "正文" * 100
+    note += f"\n\n> ⚠️ {QUALITY_WARNING_MARKER}（正文过短），需人工校对补深度\n"
+    path = tmp_path / "note.md"
+    path.write_text(note, encoding="utf-8")
+
+    assert read_if_valid(path, "note") is not None
+    assert read_note_if_complete(path) is None

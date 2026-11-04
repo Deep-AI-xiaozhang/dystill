@@ -120,6 +120,29 @@ providers:
     assert vis["status"] == "NEED_SETUP" and vis["fix"]
 
 
+def test_doctor_does_not_claim_ready_without_required_stt(tmp_path: Path, monkeypatch):
+    """模型配好不等于能跑：缺 faster-whisper 时体检必须判未就绪。"""
+    from distill_workshop import doctor
+
+    app = _load(tmp_path, """
+providers:
+  - name: vision
+    api_base: https://x/v1
+    api_key: k
+    model: m
+""")
+    monkeypatch.setattr(doctor, "load_config", lambda *a, **k: app)
+    monkeypatch.setattr(doctor.shutil, "which", lambda name: "ffmpeg" if name == "ffmpeg" else None)
+    monkeypatch.setattr(doctor, "find_spec",
+                        lambda name: None if name == "faster_whisper" else object())
+
+    report = doctor.run_doctor()
+    stt = next(c for c in report["checks"] if c["name"] == "stt(faster-whisper)")
+    assert stt["status"] == "NEED_SETUP"
+    assert "pip install faster-whisper" in stt["fix"]
+    assert not report["ok"]
+
+
 def test_provider_config_defaults(monkeypatch):
     p = ProviderConfig(name="x", api_base="b", api_key="k", model="m")
     assert p.vision is True and p.ready is True
@@ -181,7 +204,8 @@ def test_config_ignores_unknown_keys(tmp_path):
         "download:\n  downloader_dir: x\n  timeout: 30\n", encoding="utf-8")
     cfg = load_config(tmp_path)
     assert cfg.stt.model == "small"
-    assert cfg.download.downloader_dir == "x"
+    # 相对路径按配置文件所在目录解析成绝对路径（不再随当前工作目录漂移）
+    assert Path(cfg.download.downloader_dir) == (tmp_path / "x").resolve()
 
 
 def test_relative_workspace_paths_are_resolved_from_root(tmp_path):
@@ -197,3 +221,44 @@ workspace:
     assert app.notes_dir == app.root / "notes"
     assert app.data_dir == app.root / "data"
     assert app.cache_dir == app.root / "cache"
+
+
+def test_relative_config_paths_follow_config_dir_not_cwd(tmp_path, monkeypatch):
+    """配置里的相对路径必须相对配置文件解析，不能随「在哪个目录敲命令」漂移。
+
+    回归（2026-11-04）：`downloader_dir: external/douyin-downloader` 是相对写法，
+    从 docs/ 子目录跑 dystill doctor 时报「配置目录不存在」；api_key_file 同理。
+    """
+    from distill_workshop.config import load_config
+
+    kf = tmp_path / "keys" / "k.txt"
+    kf.parent.mkdir()
+    kf.write_text("KEY123", encoding="utf-8")
+    (tmp_path / "config.yaml").write_text(
+        "download:\n  downloader_dir: external/douyin-downloader\n  config_yml: downloader.base.yml\n"
+        "providers:\n  - name: p\n    api_base: http://x\n    api_key_file: keys/k.txt\n    model: m\n",
+        encoding="utf-8")
+    # 模拟在别的目录执行：CWD 与配置文件目录不同
+    monkeypatch.chdir(tmp_path.parent)
+    cfg = load_config(tmp_path)
+    assert Path(cfg.download.downloader_dir) == (tmp_path / "external/douyin-downloader").resolve()
+    assert Path(cfg.download.config_yml) == (tmp_path / "downloader.base.yml").resolve()
+    assert Path(cfg.providers[0].api_key_file) == kf.resolve()
+    assert cfg.providers[0].api_key == "KEY123"
+
+
+def test_unknown_stt_backend_is_reported_as_setup_needed(tmp_path, monkeypatch):
+    """配了不存在的 STT 后端必须报 NEED_SETUP，不能报绿。
+
+    回归（2026-11-04）：doctor 原来对非 faster-whisper 的 backend 写「云端，随 providers 走」
+    并判 ok，但代码里根本没有云端实现——doctor 说能跑，实际 pipeline 抛「未配置 STT 后端」。
+    """
+    from distill_workshop import doctor
+
+    (tmp_path / "config.yaml").write_text("stt:\n  backend: some-cloud-api\n", encoding="utf-8")
+    monkeypatch.setattr(doctor, "load_config", lambda *a, **k: __import__(
+        "distill_workshop.config", fromlist=["load_config"]).load_config(tmp_path))
+    report = doctor.run_doctor()
+    ck = next(c for c in report["checks"] if c["name"] == "stt")
+    assert ck["status"] == "NEED_SETUP"
+    assert "只实现了 faster-whisper" in ck["detail"]

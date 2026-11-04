@@ -1,5 +1,9 @@
 """STT 设备/精度解析（D38）：CUDA 上不许落回 int8_float16。"""
-from distill_workshop.core.stt import resolve_device_compute
+from pathlib import Path
+
+import pytest
+
+from distill_workshop.core.stt import FasterWhisperSTT, resolve_device_compute
 
 
 def test_auto_with_cuda_picks_float16():
@@ -32,3 +36,47 @@ def test_explicit_compute_type_wins():
 def test_blank_and_case_insensitive():
     assert resolve_device_compute("", "", cuda_available=True) == ("cuda", "float16")
     assert resolve_device_compute(" CUDA ", "", cuda_available=True) == ("cuda", "float16")
+
+
+class _Segment:
+    def __init__(self, text):
+        self.start = 0.0
+        self.text = text
+
+
+class _FlakyModel:
+    def __init__(self, fail):
+        self.fail = fail
+
+    def transcribe(self, *args, **kwargs):
+        if self.fail:
+            raise RuntimeError("Library cublas64_12.dll is not found or cannot be loaded")
+        return iter([_Segment("CPU 转写成功")]), None
+
+
+def test_auto_cuda_runtime_error_falls_back_to_cpu(monkeypatch):
+    """CUDA 驱动在但 cuBLAS 缺失时，默认 auto 必须自动退回 CPU，而不是让首跑失败。"""
+    monkeypatch.setattr("distill_workshop.core.stt.resolve_device_compute",
+                        lambda *a, **k: ("cuda", "float16"))
+    stt = FasterWhisperSTT(device="auto")
+    made = []
+
+    def make_model(device, compute):
+        made.append((device, compute))
+        return _FlakyModel(fail=device == "cuda")
+
+    monkeypatch.setattr(stt, "_make_model", make_model)
+    got = stt.transcribe_raw(Path("audio.wav"))
+
+    assert got == [(0.0, "CPU 转写成功")]
+    assert made == [("cuda", "float16"), ("cpu", "int8")]
+    assert "已自动改用 CPU" in stt.last_fallback
+
+
+def test_explicit_cuda_does_not_silently_fallback(monkeypatch):
+    """用户明确指定 cuda 时不能悄悄换 CPU；错误必须暴露，避免误以为在用显卡。"""
+    stt = FasterWhisperSTT(device="cuda")
+    monkeypatch.setattr(stt, "_make_model",
+                        lambda device, compute: _FlakyModel(fail=True))
+    with pytest.raises(RuntimeError, match="cublas"):
+        stt.transcribe_raw(Path("audio.wav"))

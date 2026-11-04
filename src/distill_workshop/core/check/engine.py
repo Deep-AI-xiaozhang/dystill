@@ -19,7 +19,7 @@ from pathlib import Path
 from ...config import AppConfig, ProviderConfig
 from ...identity import extract_aweme_id
 from .. import ledger
-from ..artifacts import read_if_valid
+from ..artifacts import read_if_valid, read_note_if_complete
 from .claim_extractor import extract_claims
 from .evidence_retriever import SourceIndex, retrieve_all
 from .models import VERDICT_DOUBT, CheckResult
@@ -146,7 +146,10 @@ def analyze(note_text: str, transcript: str, vlm: str, *, mode: str = "standard"
     if not transcript and not vlm:
         raise ValueError("没有转写/画面素材，无法核对")
 
-    claims, skipped = extract_claims(note_text, m, chat_fn=_l1_chat_fn(app, chat_fn),
+    # resume / retry-failed 的前提是“已有声明集合可复用”。这时若仍调 L1 消歧模型，
+    # 会改写/拆分声明，导致条数漂移，也违背 CLI 的“不调用模型”承诺。
+    l1_chat = None if (previous and (resume or only_failed)) else _l1_chat_fn(app, chat_fn)
+    claims, skipped = extract_claims(note_text, m, chat_fn=l1_chat,
                                      on_step=on_step)
     result.claims, result.skipped = claims, skipped
     if not claims:
@@ -158,17 +161,24 @@ def analyze(note_text: str, transcript: str, vlm: str, *, mode: str = "standard"
     # 断点续跑：先决定哪些条目还需要问模型
     pending = claims
     if previous and (resume or only_failed):
-        pending, reused = [], 0
+        pending, reused, unmatched = [], 0, 0
         for c in claims:
             prev = previous.get(c.original.strip()) or previous.get(c.text.strip())
-            if prev and not (only_failed and prev_failed(prev)):
+            if not prev:
+                # 旧报告可能由不同 L1 规则生成。续跑承诺“不调模型”，所以对不上也不能重判。
+                c.verdict = VERDICT_DOUBT
+                c.reason = "上一轮报告没有这条声明的判定；如需全量重核，请去掉 --resume / --retry-failed"
+                c.fix = "建议回看原片确认"
+                unmatched += 1
+            elif only_failed and prev_failed(prev):
+                pending.append(c)
+            else:
                 c.verdict = prev.get("verdict") or c.verdict
                 c.reason, c.fix = prev.get("reason", ""), prev.get("fix", "")
                 c.failed = bool(prev.get("failed"))
                 reused += 1
-            else:
-                pending.append(c)
-        _log(on_step, f"♻️ 复用上一轮判定 {reused} 条，需重判 {len(pending)} 条")
+        _log(on_step, f"♻️ 复用上一轮判定 {reused} 条，需重判 {len(pending)} 条"
+                      f"{f'，{unmatched} 条旧报告未覆盖记存疑' if unmatched else ''}")
         if not pending:
             _log(on_step, "没有需要重判的条目（要全量重判请去掉 --resume / --retry-failed）")
 
@@ -214,7 +224,7 @@ def run_check(record_dir: Path, app: AppConfig, *, mode: str = "standard",
     if not note_file or not note_file.is_file():
         raise FileNotFoundError(f"记录目录里没有笔记可核对：{rd}")
 
-    note_text = read_if_valid(note_file, "note")
+    note_text = read_note_if_complete(note_file)
     if note_text is None:
         raise ValueError(f"笔记未过有效性闸门（可能过短/空壳），拒绝核对：{note_file}")
 
@@ -228,10 +238,13 @@ def run_check(record_dir: Path, app: AppConfig, *, mode: str = "standard",
 
     _log(on_step, f"核对 [{get_mode(mode).label}]：{note_file.name}"
                   f"（素材 {len(transcript)} 字转写 / {len(vlm)} 字画面）")
+    previous = load_previous(rd) if (resume or only_failed) else None
+    if (resume or only_failed) and not previous:
+        raise ValueError("没有上一轮核对结果可复用；请先正常运行 dystill check（不要加续跑参数）")
     result = analyze(note_text, transcript, vlm, mode=mode, chat_fn=chat_fn, app=app,
                      frames_dir=rd / "frames", key=key, on_step=on_step,
                      batch_delay=batch_delay,
-                     previous=load_previous(rd) if (resume or only_failed) else None,
+                     previous=previous,
                      resume=resume, only_failed=only_failed)
 
     # L4

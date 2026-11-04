@@ -51,14 +51,13 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-local-stt = ["faster-whisper>=1.0"]
-# B 站分流（core/download.py 走 yt-dlp）。刻意不做硬依赖：产品定位"只做抖音"，
-# 每个本地文件/抖音用户都被迫装一个 B 站下载器，违背 v2 的"砍范围"精神。
-# 缺了不崩：B 站链接会给出可行动的安装提示。
-bilibili = ["yt-dlp>=2024.8.6"]
+# faster-whisper 1.2.x 读取元数据时使用 av.open(..., metadata_errors=...)，
+# av 19 已移除该参数；锁在 15.x 才能避免“安装成功、一开转写就崩”。
+local-stt = ["faster-whisper>=1.0", "av>=11,<16"]
 # 抖音风控兜底：真浏览器取播放地址（core/browser_download.py）。
 # 只处理抖音链接时需要，且装完还得 `playwright install chromium`；没装会自动退回 API 重试，
-# 本地文件 / B 站路径完全不受影响——所以不做硬依赖。
+# 本地文件路径完全不受影响——所以不做硬依赖。
+# （B 站分流的 `[bilibili]` extra 已于 2026-11-04 移除，见 docs/DECISIONS.md D57）
 douyin-browser = ["playwright>=1.40"]
 dev = ["pytest>=8", "ruff>=0.6", "build>=1.2", "twine>=5"]
 

@@ -6,7 +6,10 @@
 早期实现早有 `sys.stdout.reconfigure` 兜底，移植到开源版时漏了。
 """
 import io
+import json
+import os
 import sys
+import time
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -106,3 +109,97 @@ def test_clean_reports_stale_dirs_without_deleting(tmp_path, monkeypatch, capsys
 
     assert cli.cmd_clean(SimpleNamespace(apply=True, cache_days=7)) == 0
     assert not stale.exists()  # --apply 才真删
+
+
+def test_clean_keeps_evidence_unless_purge_flag(tmp_path, monkeypatch, capsys):
+    """常规 clean 只清大文件；文本证据必须由 --purge-evidence 显式授权。"""
+    from distill_workshop import cli
+    from distill_workshop.config import AppConfig
+
+    data = tmp_path / "data"
+    record = data / "aweme_123"
+    frames = record / "frames"
+    frames.mkdir(parents=True)
+    evidence = record / "transcript.txt"
+    frame = frames / "001.jpg"
+    evidence.write_text("足够长的转写证据" * 20, encoding="utf-8")
+    frame.write_bytes(b"x")
+    old = time.time() - 30 * 86400
+    os.utime(evidence, (old, old))
+    os.utime(frame, (old, old))
+    app = AppConfig(root=tmp_path, notes_dir=tmp_path / "notes",
+                    data_dir=data, cache_dir=tmp_path / "cache")
+    monkeypatch.setattr("distill_workshop.config.load_config", lambda *a, **k: app)
+
+    assert cli.cmd_clean(SimpleNamespace(
+        apply=True, cache_days=7, purge_evidence=False)) == 0
+    assert evidence.exists()
+    assert not frame.exists()                    # 大文件已按常规规则清掉
+
+    assert cli.cmd_clean(SimpleNamespace(
+        apply=True, cache_days=7, purge_evidence=True)) == 0
+    assert not evidence.exists()
+    assert "--purge-evidence" in capsys.readouterr().out
+
+
+def test_clean_finished_audio_runs_at_end_of_task(tmp_path, capsys):
+    """run 结束时也要立即清音轨，不能留到下一次任务。"""
+    from distill_workshop.cli import _clean_finished_audio
+
+    record = tmp_path / "aweme_123"
+    record.mkdir()
+    (record / "transcript.txt").write_text(
+        "足够长的有效转写正文，用来证明音轨已经用完，可以安全删除。" * 2,
+        encoding="utf-8")
+    audio = record / "audio.wav"
+    audio.write_bytes(b"x" * 1024)
+
+    _clean_finished_audio(tmp_path, announce=True)
+
+    assert not audio.exists()
+    assert "转写成果保留" in capsys.readouterr().out
+
+
+def test_clean_purge_orphans_requires_explicit_flag(tmp_path, monkeypatch, capsys):
+    """清笔记后留下的素材孤儿，只有显式 --purge-orphans 才删。"""
+    from distill_workshop import cli
+    from distill_workshop.config import AppConfig
+
+    data = tmp_path / "data"
+    record = data / "aweme_orphan"
+    record.mkdir(parents=True)
+    transcript = record / "transcript.txt"
+    transcript.write_text("足够长的有效转写正文，用来模拟清掉笔记后留下的素材目录。" * 2,
+                          encoding="utf-8")
+    old = time.time() - 30 * 86400
+    os.utime(transcript, (old, old))
+    app = AppConfig(root=tmp_path, notes_dir=tmp_path / "notes",
+                    data_dir=data, cache_dir=tmp_path / "cache")
+    monkeypatch.setattr("distill_workshop.config.load_config", lambda *a, **k: app)
+
+    assert cli.cmd_clean(SimpleNamespace(
+        apply=True, cache_days=7, purge_evidence=False, purge_orphans=False)) == 0
+    assert record.exists()
+
+    assert cli.cmd_clean(SimpleNamespace(
+        apply=True, cache_days=7, purge_evidence=False, purge_orphans=True)) == 0
+    assert not record.exists()
+    assert "purge-orphans" in capsys.readouterr().out
+
+
+def test_run_without_stt_gives_install_command(tmp_path, monkeypatch, capsys):
+    """跳过 doctor 直接 run 时，缺转写也要给人能照着执行的命令。"""
+    from distill_workshop import cli
+    from distill_workshop.config import AppConfig
+
+    app = AppConfig(root=tmp_path, notes_dir=tmp_path / "notes",
+                    data_dir=tmp_path / "data", cache_dir=tmp_path / "cache")
+    monkeypatch.setattr("distill_workshop.config.load_config", lambda *a, **k: app)
+    monkeypatch.setattr(cli, "find_spec", lambda name: None)
+
+    code = cli.cmd_run(SimpleNamespace(
+        urls=[str(tmp_path / "video.mp4")], json=True, check=None))
+    result = json.loads(capsys.readouterr().out)
+
+    assert code == 2
+    assert "pip install faster-whisper" in result[0]["error"]

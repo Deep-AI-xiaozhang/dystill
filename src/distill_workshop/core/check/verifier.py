@@ -14,7 +14,7 @@ import json
 import re
 import time
 
-from .models import VERDICT_DOUBT, VERDICT_MISMATCH, VERDICT_OK, Claim
+from .models import KIND_NUMBER, VERDICT_DOUBT, VERDICT_MISMATCH, VERDICT_OK, Claim
 from .modes import CheckMode
 
 # 模型漏返某条判定时的占位理由——带这个理由的条目会被"单独补问"一次，
@@ -106,6 +106,8 @@ _PROMPT = """你是视频笔记的事实核对员。任务：判断笔记里的�
     或者转写和画面说法不一致），**不要自己选边站判"mismatch"**。
     这种情况说明原视频本身前后不一致，或者某个证据来源有误，应判"doubt"并在reason里写明
     "证据内部矛盾（画面XX显示A，画面YY显示B），无法判定"。
+13b. **同一画面可能有多个并列截图/多个区域**：一个画面里可以同时出现左侧图、右侧图或多个价格标签。
+    声明说的是其中一个，不能拿另一个区域的数字直接判 mismatch；只有整条证据明确否定声明时才算不一致。
 14. **"mismatch" 必须是明确否定，不是"没明说"**：
     只有当证据**明确说了相反的事**才判 "mismatch"。常见误判：
     - 声明说"X是A"，证据没提A但也没说X不是A → 这是 "doubt"，不是 "mismatch"
@@ -123,6 +125,9 @@ _PROMPT = """你是视频笔记的事实核对员。任务：判断笔记里的�
 """
 
 
+_EVIDENCE_PREVIEW_CHARS = 2400
+
+
 def _fmt_evidence(c: Claim) -> str:
     if not c.evidence:
         return "    （无证据）"
@@ -134,7 +139,9 @@ def _fmt_evidence(c: Claim) -> str:
         tag = "转写" if e.source == "transcript" else "画面"
         pos = f"{e.ts} " if e.ts else ""
         mark = "★含全部硬事实 " if e.fact_hit >= 1.0 else ""
-        lines.append(f"    - [{tag}{pos}]{mark}{e.text[:400]}")
+        # 一张图的文字可能超过 400 字；模板字段常在后半段，截太短会让模型
+        # 明明拿到了整张图却只看到场景描述，最终把真实内容判成存疑。
+        lines.append(f"    - [{tag}{pos}]{mark}{e.text[:_EVIDENCE_PREVIEW_CHARS]}")
     return "\n".join(lines)
 
 
@@ -200,6 +207,13 @@ def apply_gates(c: Claim, mode: CheckMode) -> Claim:
     3. 声明用了"对外提供/买卖"措辞而原素材里连这词都没有 → 不许判一致（推理性改写，见 D9）
     4. 深度模式再加覆盖度阈值
     """
+    # 数字类声明如果 L2 已经确认声明里的数字在证据中出现过，模型仍可能只盯着
+    # 同一画面的另一块截图判“不一致”。这不是明确矛盾，降成存疑更安全。
+    if c.verdict == VERDICT_MISMATCH and c.kind == KIND_NUMBER and not c.miss_numbers:
+        c.verdict = VERDICT_DOUBT
+        c.reason = (c.reason + "；声明中的数字已在证据中出现，但可能对应另一块截图/区域，不能判明确矛盾").strip("；")
+        c.fix = c.fix or "建议回看同一画面的多个截图/区域，确认数字归属"
+        return c
     if c.verdict != VERDICT_OK:
         return c
     if not c.evidence:

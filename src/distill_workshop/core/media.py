@@ -13,7 +13,6 @@ AUDIO_EXTS = {".mp3", ".m4a", ".wav", ".aac", ".ogg", ".flac"}
 _NO_WINDOW = getattr(subprocess, "CREATE_NO_WINDOW", 0)
 
 _DOUYIN_RE = re.compile(r"(?i)(douyin\.com|v\.douyin\.com|iesdouyin)")
-_BILIBILI_RE = re.compile(r"(?i)(bilibili\.com|b23\.tv)")
 
 
 def has_no_video_stream(path: Path) -> bool:
@@ -76,8 +75,9 @@ def media_duration(path: Path) -> float:
 
 
 def detect_source(url_or_path: str) -> str:
-    """输入分流：audio / local_video / douyin / bilibili / unknown。
-    抖音具体是视频还是图文帖，由下载产物判断（短链无法预判）。"""
+    """输入分流：audio / local_video / douyin / unknown。
+    抖音具体是视频还是图文帖，由下载产物判断（短链无法预判）。
+    平台范围只有抖音（D57）；别的平台链接归到 unknown，由下载层给可行动提示。"""
     u = url_or_path.strip()
     p = Path(u)
     if p.is_file():
@@ -87,8 +87,6 @@ def detect_source(url_or_path: str) -> str:
         return "audio"
     if p.suffix.lower() in {".mp4", ".mkv", ".mov", ".avi", ".flv", ".webm", ".ts"}:
         return "local_video"
-    if _BILIBILI_RE.search(u):
-        return "bilibili"
     if _DOUYIN_RE.search(u):
         return "douyin"
     return "unknown"

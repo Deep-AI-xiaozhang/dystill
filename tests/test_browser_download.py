@@ -50,6 +50,28 @@ def test_looks_like_mp4_accepts_ftyp_rejects_html():
     assert not bd.looks_like_mp4(b"short")
 
 
+def test_browser_response_json_errors_are_silenced():
+    class DeadResponse:
+        def json(self):
+            raise RuntimeError("Target page, context or browser has been closed")
+
+    assert bd.response_json_or_none(DeadResponse()) is None
+
+
+def test_gallery_image_urls_filters_ui_squares_and_dedupes():
+    items = [
+        {"src": "https://p.douyinpic.com/avatar/1.jpg", "naturalWidth": 1200, "naturalHeight": 1200},
+        {"src": "https://p.douyinpic.com/note/ok1.jpg", "naturalWidth": 1792, "naturalHeight": 2400},
+        {"src": "https://p.douyinpic.com/note/icon.png", "naturalWidth": 512, "naturalHeight": 512},
+        {"src": "https://p3.douyinpic.com/note/ok1.jpg?x=2", "naturalWidth": 1792, "naturalHeight": 2400},
+        {"src": "https://p.douyinpic.com/note/ok2.jpg", "naturalWidth": 1792, "naturalHeight": 2400},
+    ]
+    got = bd.gallery_image_urls(items)
+    assert len(got) == 2
+    assert got[0].endswith("ok1.jpg")
+    assert got[1].endswith("ok2.jpg")
+
+
 def test_playwright_available_without_playwright(monkeypatch):
     """没装 playwright 时返回 (False, 含安装提示) 且不抛异常。
 

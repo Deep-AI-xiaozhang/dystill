@@ -18,7 +18,6 @@
 | 项目 | 许可证 | 用途 | 引入方式 |
 | --- | --- | --- | --- |
 | [douyin-downloader](https://github.com/jiji262/douyin-downloader) | MIT（© jiji262 及贡献者） | 抖音视频下载（含风控兜底链路） | `external/` 第三方 checkout，不随本仓库分发 |
-| [yt-dlp](https://github.com/yt-dlp/yt-dlp) | Unlicense | B 站链接分流下载 | 可选依赖 `[bilibili]` |
 | [Playwright (Python)](https://github.com/microsoft/playwright-python) | Apache-2.0 | 真浏览器取抖音播放地址 | 可选依赖 `[douyin-browser]`，另需 `playwright install chromium` |
 | [faster-whisper](https://github.com/SYSTRAN/faster-whisper) | MIT | 本地语音转写（本地 STT 路径） | 可选依赖 `[local-stt]` |
 | [FFmpeg](https://ffmpeg.org/) | LGPL-2.1+ / GPL（取决于构建选项） | 音视频解码、抽音频、切片 | **系统外部程序**，不随本仓库分发 |

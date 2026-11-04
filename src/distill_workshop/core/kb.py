@@ -20,6 +20,8 @@ import re
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from .frontmatter import unquote_scalar, yaml_scalar
+
 INDEX_NAME = "知识库.md"
 
 # 类型轴：笔记层产出的两个值（notes.py）。未知值原样保留，不猜。
@@ -90,7 +92,7 @@ def parse_note(path: Path) -> NoteMeta:
             if ":" not in line or line.startswith(" "):
                 continue
             k, _, v = line.partition(":")
-            k, v = k.strip(), v.strip().strip('"').strip("'")
+            k, v = k.strip(), unquote_scalar(v.strip())
             if k == "key":
                 meta.key = v
             elif k == "title" and not meta.title:
@@ -299,10 +301,12 @@ def upsert_frontmatter(path: Path, meta: NoteMeta) -> bool:
     返回 True 表示文件有变化。已有 frontmatter 时逐字段更新；没有则新建。
     """
     text = path.read_text(encoding="utf-8", errors="replace")
+    # 这几个值都来自笔记正文（模型产出），可能带 `#`、`:`、`-` 开头——裸写进 YAML 会让
+    # Obsidian 把整篇 frontmatter 读坏（`type: #实操` 变注释、`- xx` 直接 ScannerError）。
     managed = {
-        "type": meta.ntype,
-        "topic": meta.topic,
-        "tags": "[" + ", ".join(meta.tags) + "]",
+        "type": yaml_scalar(meta.ntype),
+        "topic": yaml_scalar(meta.topic),
+        "tags": "[" + ", ".join(yaml_scalar(t) for t in meta.tags) + "]",
     }
     fm = _FM_RE.match(text)
     if fm:

@@ -12,6 +12,8 @@ from distill_workshop.core.download import (
     GalleryDetected,
     RiskControlDetected,
     _latest_by_aweme,
+    cached_gallery_by_aweme,
+    cached_media_by_aweme,
     manifest_gallery_files,
     reuse_downloaded,
     step_download,
@@ -67,6 +69,43 @@ def test_reuse_downloaded_without_identity_gives_up(tmp_path: Path):
     write_manifest(dl, [{"aweme_id": "111", "file_paths": ["aweme_111_a.mp4"]}])
     # 无法取得 aweme_id（模拟短链展开失败）→ 安全放弃，绝不扫全目录
     assert reuse_downloaded("https://v.douyin.com/x/", dl, set(), aweme_id=None) is None
+
+
+def test_cached_media_by_aweme_uses_exact_numeric_id(tmp_path: Path):
+    dl = tmp_path / "dl"
+    dl.mkdir()
+    (dl / "2026-10-20_标题_1110.mp4").write_bytes(b"wrong")
+    right = dl / "2026-10-20_标题_111.mp4"
+    right.write_bytes(b"right")
+    assert cached_media_by_aweme(dl, "111") == right
+
+
+def test_douyin_download_reuses_browser_cached_media_without_network(tmp_path: Path, monkeypatch):
+    """浏览器下载没写 manifest，也要按 ID 复用本机文件，不能再撞平台风控。"""
+    app = make_douyin_app(tmp_path)
+    dl = app.cache_dir / "dl"
+    dl.mkdir(parents=True)
+    media = dl / "2026-10-20_标题_7381234567890123456.mp4"
+    media.write_bytes(b"x" * 100)
+    monkeypatch.setattr(dlmod, "cookie_health",
+                        lambda *a, **k: (_ for _ in ()).throw(AssertionError("不该查网络状态")))
+
+    got = dlmod._download_douyin(
+        "https://www.douyin.com/video/7381234567890123456",
+        dl, app.download, app.cache_dir)
+
+    assert got == media
+
+
+def test_cached_gallery_by_aweme_returns_only_matching_images(tmp_path: Path):
+    dl = tmp_path / "dl"
+    dl.mkdir()
+    a = dl / "note_111_01.jpg"
+    b = dl / "note_111_02.png"
+    other = dl / "note_1110_01.jpg"
+    for path in (a, b, other):
+        path.write_bytes(b"x")
+    assert cached_gallery_by_aweme(dl, "111") == [a, b]
 
 
 def test_manifest_gallery_files_all_or_nothing(tmp_path: Path):
@@ -254,15 +293,15 @@ def test_gallery_and_deterministic_errors_not_retried(tmp_path: Path, monkeypatc
                                    app.cache_dir / "dl", app.download, app.cache_dir)
 
 
-def test_bilibili_without_yt_dlp_gives_install_hint(tmp_path: Path, monkeypatch):
-    """yt-dlp 是可选组件（bilibili extra）：没装必须报可行动补救，不裸抛子进程报错。"""
-    monkeypatch.setattr(dlmod, "_yt_dlp_available", lambda: False)
+def test_bilibili_link_gives_actionable_hint(tmp_path: Path, monkeypatch):
+    """B 站分流已移除（D57）：给 B 站链接要报可行动提示，而不是静默失败或起子进程。"""
     monkeypatch.setattr(dlmod, "run",
-                        lambda *a, **k: (_ for _ in ()).throw(AssertionError("缺依赖就不该起子进程")))
+                        lambda *a, **k: (_ for _ in ()).throw(AssertionError("不该起下载子进程")))
+    app = AppConfig(root=tmp_path, notes_dir=tmp_path, data_dir=tmp_path, cache_dir=tmp_path)
     with pytest.raises(DownloadError) as e:
-        dlmod._download_bilibili("https://www.bilibili.com/video/BV1xx411c7sd/", tmp_path / "dl")
+        dlmod.step_download("https://www.bilibili.com/video/BV1xx411c7sd/", app)
     msg = str(e.value)
-    assert "dystill[bilibili]" in msg
-    assert "本地文件" in msg or "dystill run" in msg      # 不装也有路可走
+    assert "只支持抖音" in msg
+    assert "本地文件" in msg or "dystill run" in msg      # 仍给可走的替代路径
 
 

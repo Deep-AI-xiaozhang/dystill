@@ -76,7 +76,17 @@ _TS_LINE_RE = re.compile(r"^\s*\[(\d{1,2}:\d{2}(?::\d{2})?)\]\s*(.*)$")
 _CJK_RE = re.compile(r"[\u4e00-\u9fff]+")
 _EN_RE = re.compile(r"[A-Za-z][A-Za-z0-9.+-]*")
 _NUM_RE = re.compile(r"\d+")
+_TIMECODE_RE = re.compile(
+    r"(?<![\d:])\d{1,2}:\d{2}(?::\d{2})?"
+    r"(?:\s*[-—~至]\s*\d{1,2}:\d{2}(?::\d{2})?)?(?![\d:])"
+)
+_NOTE_LINE_REF_RE = re.compile(r"第\s*[0-9一二三四五六七八九十百]+\s*行")
+_FILENAME_NUM_PREFIX_RE = re.compile(r"(?<![A-Za-z0-9])\d{1,4}(?=-[A-Za-z])")
 _IMG_ORD_RE = re.compile(r"第\s*([一二三四五六七八九十百\d]+)\s*(?:张|幅|帧|个图|张图)")
+# 画面理解标记里自带的帧文件名：`--- 第 1 张图（001.jpg） ---`（vision.py 的 _marker）。
+# 有了它，帧号 → 时间戳可以按**文件名**查，而不是按序号数——序号映射在"帧集合被重采样过"
+# 时必然错位（见 Segment.frame_name 注释）。
+_FRAME_FILE_RE = re.compile(r"[（(]\s*([^（）()\s]+\.(?:jpg|jpeg|png|webp))\s*[）)]", re.IGNORECASE)
 # 声明/栏目里直接写了"第 5-6 张""第11-13张"时，那几帧才是它的证据来源
 _FRAME_REF_RE = re.compile(r"第\s*([一二三四五六七八九十百\d]+)\s*(?:[-—~至]\s*([一二三四五六七八九十百\d]+)\s*)?张")
 # 老工具（distill.step_vision）写的是 `--- 帧 3/18 ---`，没有"第"字；
@@ -93,9 +103,9 @@ _MIN_SEG_CHARS = 2
 # 25 条里就有 3~5 条判定漂移，噪声大于信号。故这只是一次方向性的小调整
 # （多召回比少召回安全），不是已验证的改进；要下结论需新视频 + 人标真值。
 DEFAULT_TOPK = 6
-EVIDENCE_BUDGET = 1800
+EVIDENCE_BUDGET = 2400
 PIN_BUDGET_FACTOR = 2      # 钉住的证据可以超出常规预算到这个倍数，但也不是无限（防长笔记撑爆提示词）
-PIN_MIN_CHARS = 1500       # 钉住证据的保底字数：预算被调得很小时，钉住的也不许被裁掉（钉了就得不掉）
+PIN_MIN_CHARS = 1800       # 钉住证据的保底字数：预算被调得很小时，钉住的也不许被裁掉（钉了就得不掉）
 
 _CN_DIGITS = {"一": 1, "二": 2, "两": 2, "三": 3, "四": 4, "五": 5,
               "六": 6, "七": 7, "八": 8, "九": 9, "十": 10}
@@ -197,11 +207,22 @@ def coverage(query: set[str], doc: set[str]) -> float:
 # 导致"证据不相关"和"证据相关"分数差不多，逼着模型一律判 ⚠️ 存疑。
 # 而**数字**是最硬的事实点：转写会把工具名听错（ZCode→dcode、Codex→codes），
 # 但数字很少听错，所以"数字在原素材里 0 命中"≈ 这个数字是编的或抄错的。
-_HARD_NUM_RE = re.compile(r"\d+(?:\.\d+)?")
+_HARD_NUM_RE = re.compile(r"\d[\d,]*(?:\.\d+)?")
 _HARD_EN_RE = re.compile(r"[A-Za-z][A-Za-z0-9]*(?:[.+-][A-Za-z0-9]+)*")
 _EN_STOP = {"the", "and", "for", "app", "com", "www", "ok", "ai"}   # 太泛的词不给权重
 # 中文数字的组成字符（数字边界判定用）
 _CN_DIGIT_CHARS = "零一二三四五六七八九十百千万两"
+
+
+def _normalize_number(raw: str) -> str:
+    """把 13,000.00 归一成 13000；格式差异不是“编造数字”。"""
+    s = (raw or "").replace(",", "")
+    if "." in s:
+        a, b = s.split(".", 1)
+        a = a.lstrip("0") or "0"
+        b = b.rstrip("0")
+        return f"{a}.{b}" if b else a
+    return s.lstrip("0") or "0"
 
 
 def hard_facts(text: str) -> tuple[set[str], set[str]]:
@@ -211,8 +232,14 @@ def hard_facts(text: str) -> tuple[set[str], set[str]]:
     若把它当硬事实，会触发「数字在原素材里查不到」闸门，把本该 ✅ 的声明压成 ⚠️（实测踩到）。
     所以先剥掉「第 N 张/幅/帧/个图」里的帧号再提数字。
     """
-    t = _FRAME_REF_RE.sub("", _IMG_ORD_RE.sub("", text or ""))
-    nums = {n.lstrip("0") or "0" for n in _HARD_NUM_RE.findall(t)}
+    t = text or ""
+    # 先剥掉“第 N 张图”（帧号）和“第 N 行”（笔记行号）；它们不是声明事实。
+    t = _FRAME_REF_RE.sub("", _IMG_ORD_RE.sub("", t))
+    t = _NOTE_LINE_REF_RE.sub("", t)
+    # 时间码、文件名前缀里的 00 也不是数字事实。
+    t = _TIMECODE_RE.sub("", t)
+    t = _FILENAME_NUM_PREFIX_RE.sub("", t)
+    nums = {_normalize_number(n) for n in _HARD_NUM_RE.findall(t)}
     names = {w.lower() for w in _HARD_EN_RE.findall(text or "")
              if len(w) >= 2 and w.lower() not in _EN_STOP}
     return nums, names
@@ -228,7 +255,17 @@ def _number_in_source(v: str, src: str) -> bool:
     """
     if not v:
         return False
-    pat = rf"(?<![0-9{_CN_DIGIT_CHARS}]){re.escape(v)}(?![0-9{_CN_DIGIT_CHARS}])"
+    # 原素材里的千分位不是事实差异：13,000.00 与 13000 是同一个数。
+    src = re.sub(r"(?<=\d),(?=\d{3}(?:\D|$))", "", src or "")
+    if v.isdigit():
+        # 阿拉伯数字允许中文量词紧跟（100万 / 200元），也允许 03 与 3 等价；
+        # 但仍禁止 200 命中 2000、1200 或 3.200。
+        pat = rf"(?<![0-9.])0*{re.escape(v)}(?![0-9])"
+    elif "." in v:
+        # 声明 5.3、原素材 5.30 不算缺失；5.31 仍然不能误中。
+        pat = rf"(?<![0-9.]){re.escape(v)}0*(?![0-9])"
+    else:
+        pat = rf"(?<![0-9{_CN_DIGIT_CHARS}]){re.escape(v)}(?![0-9{_CN_DIGIT_CHARS}])"
     return re.search(pat, src) is not None
 
 
@@ -269,7 +306,40 @@ def business_leap(text: str, source: str) -> list[str]:
     所以逐条证据匹配看着完全支持——**错的是推理方向，不是事实**。
     """
     src = source or ""
-    return sorted(t for t in _BIZ_TERMS if t in (text or "") and t not in src)
+    out: list[str] = []
+    for term in _BIZ_TERMS:
+        if term not in (text or "") or term in src:
+            continue
+        # “赚钱/接广告/做一单”是同一层意思，不能因为原素材没有“变现/接单”
+        # 这两个词本身就把正常概括判成推理性改写。
+        if term == "变现" and re.search(r"赚钱|变现|收益|带货|接广|接广告|广告|商单", src):
+            continue
+        if term == "接单" and re.search(r"接单|接活|做.{0,8}一单|订单|客户", src):
+            continue
+        # 口播说“可以直接代做”，笔记写“接单代做/承接代做”是同一层意思；
+        # 不要因为 ASR 没出现“接单”两个字就误报。
+        if term in {"接单", "承接"} and "代做" in src:
+            continue
+        # “画面承接逻辑/镜头承接关系”是剪辑术语，不是对外承接生意。
+        if term == "承接" and re.search(
+            r"承接(?:逻辑|关系|画面|镜头|转场|方式|结构|节奏)", text or ""
+        ):
+            continue
+        # API/云/软件服务是技术名词；发行股数里的“定价”是证券信息，
+        # 它们都不是笔记把内容写成对外商业服务。
+        if term == "服务" and re.search(
+            r"(?:API|接口|云|技术|软件|平台|服务类型)服务", text or "", re.IGNORECASE
+        ):
+            continue
+        if term == "定价" and re.search(
+            r"(?:发行|股票|IPO|注册|发行价|发行股数).{0,12}定价|"
+            r"定价.{0,12}(?:未定|尚未|均未|不确定)",
+            text or "",
+            re.IGNORECASE,
+        ):
+            continue
+        out.append(term)
+    return sorted(out)
 
 
 def frame_refs(text: str) -> set[int]:
@@ -296,6 +366,11 @@ class Segment:
     text: str
     ts: str = ""
     frame: int = 0            # 画面证据的帧序号（1-based），转写为 0
+    # 帧文件名（vlm 标记里自带，如 001.jpg）。**时间戳必须按它查，不能按序号数**：
+    # 帧集合一旦被重采样过（vlm_max_frames 调小后重跑、去重后剩 001/004/007…），
+    # 「第 N 张」与 timecodes.json 排序后第 N 个键就不再是同一帧，序号映射会静默错位
+    # （实测：001/004/007/010 四帧被报成 10/20/30/40 秒，真实值是 10/40/70/100）。
+    frame_name: str = ""
     tokens: set[str] = field(default_factory=set)
 
     def make(self) -> Segment:
@@ -336,21 +411,27 @@ def parse_vlm(text: str) -> list[Segment]:
     segs: list[Segment] = []
     pending: int | None = None      # 上一个"只有序号"的标题块下标
     current: int | None = None      # 最近一次明确出现的帧号（供后续无标记块继承）
+    current_name = ""               # 最近一次明确出现的帧文件名（同上，供时间戳映射）
     for b in raw:
         flat = _MD_MARK_RE.sub("", b).strip()
         m = _IMG_ORD_RE.search(flat) or _LEGACY_FRAME_RE.search(flat)
         n = cn_number(m.group(1)) if m else None
+        fname = _FRAME_FILE_RE.search(flat)
         if n:
             current = n
+            # 只在"带序号的标记块"里认文件名：正文里偶尔也会出现 xxx.jpg 字样，
+            # 让它们改写帧身份会把时间戳指到别的帧上。
+            current_name = fname.group(1) if fname else ""
         if m and len(flat) <= 12:                       # 纯标题块：先占位，等正文
-            segs.append(Segment(text=b, frame=n or 0))
+            segs.append(Segment(text=b, frame=n or 0, frame_name=current_name))
             pending = len(segs) - 1
             continue
         if pending is not None:                          # 正文块：并进上一个标题块
             segs[pending].text = f"{segs[pending].text}\n{b}"
             pending = None
             continue
-        segs.append(Segment(text=b, frame=n or current or 0))
+        segs.append(Segment(text=b, frame=n or current or 0,
+                            frame_name=current_name if (n or current) else ""))
     for i, s in enumerate(segs, 1):
         if not s.frame:
             s.frame = i
@@ -396,9 +477,30 @@ class SourceIndex:
         return "\n".join(s.text for s in self.transcript) + "\n" + \
                "\n".join(s.text for s in self.vlm)
 
-    def _vlm_ts(self, frame: int) -> str:
+    def vlm_units(self) -> list[Segment]:
+        """把同一张图的多个空行块拼回一条证据。
+
+        vlm.txt 里一张图常被写成“标题 + 画面文字 + 人物 + 场景”好几个块。
+        如果按块检索，最容易选到“场景描述”却漏掉真正含模板字段的“画面文字”；
+        一张图应该作为一个整体交给模型。
+        """
+        grouped: dict[int, list[str]] = {}
+        names: dict[int, str] = {}
+        for seg in self.vlm:
+            grouped.setdefault(seg.frame, []).append(seg.text)
+            if seg.frame_name:
+                names.setdefault(seg.frame, seg.frame_name)
+        return [
+            Segment(text="\n".join(parts), frame=frame, frame_name=names.get(frame, "")).make()
+            for frame, parts in sorted(grouped.items())
+        ]
+
+    def _vlm_ts(self, frame: int, frame_name: str = "") -> str:
+        """帧 → 原片时间戳。优先按文件名查，查不到才退回序号（老产物没有文件名）。"""
         if not self.frame_ts:
             return ""
+        if frame_name and frame_name in self.frame_ts:
+            return fmt_ts(self.frame_ts[frame_name])
         names = sorted(self.frame_ts)
         if 1 <= frame <= len(names):
             return fmt_ts(self.frame_ts[names[frame - 1]])
@@ -424,11 +526,18 @@ class SourceIndex:
         if not q:
             return 0.0, []
         nums, names = hard_facts(query)
+        # 只把“长数字”（年份、精确数量、分辨率）当作远距离钉住信号。
+        # 3D、5秒、4米这类短数字在几乎每段都会出现，钉住它们会把证据预算撑爆。
+        numeric_variants = {
+            v.lower() for n in nums if len(n.replace(".", "")) >= 4
+            for v in num_variants(n)
+        }
         variants = {v.lower() for n in nums for v in num_variants(n)} | {n.lower() for n in names}
         refs = frame_refs(query)     # 声明点名了"看哪几帧"时，那几帧是硬性证据
 
         picked: list[Evidence] = []
-        for segs, source in ((self.transcript, "transcript"), (self.vlm, "vlm")):
+        vlm_segs = self.vlm_units()
+        for segs, source in ((self.transcript, "transcript"), (vlm_segs, "vlm")):
             if not segs:
                 continue
             scored: list[tuple[float, float, float, int, Segment]] = []
@@ -481,13 +590,28 @@ class SourceIndex:
                 hit_var |= best_new_var
             # 钉住的段：含全部硬事实的，或声明点名的那几帧
             pin_idx = {t[3] for t in scored if t[2] >= 1.0} if pin else set()
+            if pin and numeric_variants:
+                # 长复合声明会把多个事实分散到远处几段：例如 Voxel 的
+                # “2028年发货”离 Roadster 的“2028年量产”很远。数字是强事实，
+                # 不能因为字面总分低就被窗口外的段落丢掉。
+                pin_idx |= {
+                    i for i, seg in enumerate(segs)
+                    if any(v in seg.text.lower() for v in numeric_variants)
+                }
             if refs and source == "vlm":
                 # 声明点名了"第 N 张"：那几帧是它自己的证据来源，按字面分数挑会挑错帧
                 pin_idx |= {i for i, seg in enumerate(segs) if seg.frame in refs}
             chosen |= pin_idx
-            if window > 0:
+            # 画面证据按帧合并；每帧已经自带完整上下文，再扩到相邻帧会把
+            # 当前帧的模板字段挤出证据预算。转写才需要前后窗口补全一句话。
+            if window > 0 and source == "transcript":
                 chosen |= {i for i in range(anchor - window, anchor + window + 1)
                            if 0 <= i < len(segs)}
+                # 被钉住的远处片段也要带上自己的邻句；否则“2028年量产”会回来，
+                # 但紧挨着它的“喷着气短暂飞起来”仍然丢失。
+                for pinned in pin_idx:
+                    chosen |= {i for i in range(pinned - window, pinned + window + 1)
+                               if 0 <= i < len(segs)}
 
             # 相邻段合并：同一段话被时间戳切碎时，报告里要给完整上下文
             groups: list[list[int]] = []
@@ -501,7 +625,8 @@ class SourceIndex:
                 cov = max((t[1] for t in scored if t[3] in g), default=0.0)
                 hf = max((t[2] for t in scored if t[3] in g), default=0.0)
                 text = " ".join(segs[i].text for i in g)
-                ts = segs[g[0]].ts or (self._vlm_ts(segs[g[0]].frame) if source == "vlm" else "")
+                ts = segs[g[0]].ts or (self._vlm_ts(segs[g[0]].frame, segs[g[0]].frame_name)
+                                       if source == "vlm" else "")
                 evi_type = _classify_evidence_type(text, source, ts)
                 cand.append(Evidence(source=source, text=text, ts=ts,
                                        score=round(cov, 4), fact_hit=round(hf, 4),

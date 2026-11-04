@@ -11,7 +11,11 @@ import time
 from pathlib import Path
 
 MIN_TRANSCRIPT_CHARS = 40
-_TS_RE = re.compile(r"\[\d{1,2}:\d{2}(?::\d{2})?\]")
+QUALITY_WARNING_MARKER = "初稿质量自检未通过"
+_TS_RE = re.compile(
+    r"\[\d{1,2}:\d{2}(?::\d{2})?"
+    r"(?:\s*[-–—~至]\s*\d{1,2}:\d{2}(?::\d{2})?)?\]"
+)
 
 
 def strip_timestamps(text: str) -> str:
@@ -54,6 +58,14 @@ def read_if_valid(path: Path, kind: str) -> str | None:
         return None
     text = p.read_text(encoding="utf-8", errors="replace")
     return text if VALIDATORS[kind](text) else None
+
+
+def read_note_if_complete(path: Path) -> str | None:
+    """读可复用笔记；自检失败稿允许留盘供人工看，但不能让断点续跑当成成功。"""
+    text = read_if_valid(path, "note")
+    if text is None or QUALITY_WARNING_MARKER in text:
+        return None
+    return text
 
 
 def write_if_valid(path: Path, text: str, kind: str) -> bool:
@@ -178,25 +190,28 @@ def cleanup_transcribe_scratch(data_dir: Path, *, apply: bool = False) -> list[P
     return stale
 
 
-# 中间产物：转写文本、画面理解文本、核对报告、身份信息。
-# 与「转写中间物（音轨）」不同——这些是核对引擎的证据来源，所以不立即删，
-# 而是给一个保留期（沿用 pipeline.cache_keep_days，默认 7 天），过期才清。
+# 大小两类产物分开处理：
+# - 大文件（frames/、cache/dl/ 媒体、转写音轨）可清：重跑可再生，且占空间最多。
+# - 小证据（转写/画面/核对报告/身份）默认长期保留：它们是「可回查」的实际依据，
+#   全部加起来通常只有几十 KB 到几 MB，不该为了省一点空间把产品核心价值删掉。
 #
-# **最终只留一样**：note.md（成品笔记）。这个工具的产品定义就是「一份笔记」。
-# 逐项说明为什么都可以清：
-#   - check.md / check.json：核对结论已写进笔记顶部徽章（✅ 已抽核 N/M · ⚠️ K 条存疑）
-#   - transcript.txt / vlm.txt / frames/：笔记的依据，可再生（重跑会重新下载 + 重新转写）
-#   - meta.json：身份信息。**断点续跑并不依赖它**（pipeline 只看 note.md 是否有效，
-#     身份则由目录名 data/aweme_<id> 承载）——笔记一旦生成，它就没用了。
-#     实测确认：process_record 的续跑判断是 read_if_valid(out/"note.md")，
-#     meta.json 只在「直接调用 note_fn（测试路径）」时作标题回退用。
-RAW_NAMES = ("transcript.txt", "vlm.txt", "check.md", "check.json", "meta.json")
+# 只有用户显式执行 `dystill clean --purge-evidence` 时，才允许按保留期清掉小证据。
+# 一旦清掉，旧笔记仍能读，但无法再基于原始证据重新核对。
+DURABLE_EVIDENCE_NAMES = (
+    "transcript.txt",
+    "vlm.txt",
+    "check.md",
+    "check.json",
+    "check.html",
+    "meta.json",
+)
 RAW_DIRS = ("frames",)
 
 
 def raw_material(record_dir: Path, *, days: int = 7) -> list[Path]:
-    """一条记录目录里**超过 days 天**的原始素材（转写 / 画面理解 / 切帧）。
+    """一条记录目录里**超过 days 天**的大体积产物（目前只有切帧目录）。
 
+    转写、画面理解、核对报告属于可回查证据，不在这里自动清理。
     days<=0 = 不清理。只按修改时间判断，不看内容——保留期是用户的策略，不是代码的判断。
     """
     if days <= 0:
@@ -206,10 +221,6 @@ def raw_material(record_dir: Path, *, days: int = 7) -> list[Path]:
         return []
     cutoff = time.time() - days * 86400
     out: list[Path] = []
-    for name in RAW_NAMES:
-        p = rd / name
-        if p.is_file() and p.stat().st_mtime < cutoff:
-            out.append(p)
     for name in RAW_DIRS:
         d = rd / name
         if not d.is_dir():
@@ -221,10 +232,10 @@ def raw_material(record_dir: Path, *, days: int = 7) -> list[Path]:
 
 
 def cleanup_raw_material(data_dir: Path, *, days: int = 7, apply: bool = False) -> list[Path]:
-    """清理各记录目录里过期的中间产物。apply=False 只报告（默认）。
+    """清理各记录目录里过期的大体积产物。apply=False 只报告（默认）。
 
-    **只保留 note.md**：这个工具的产品定义是「把视频蒸馏成一份笔记」，其余都是中间产物。
-    过期后每个记录目录里就只剩 note.md（+ 空目录）。
+    默认永远保留可回查的小证据；需要彻底腾空间时，由调用方显式调用
+    cleanup_evidence()，不能混在常规清理里静默执行。
     """
     data_dir = Path(data_dir)
     if not data_dir.is_dir() or days <= 0:
@@ -239,4 +250,77 @@ def cleanup_raw_material(data_dir: Path, *, days: int = 7, apply: bool = False) 
                 shutil.rmtree(p, ignore_errors=True)
             else:
                 p.unlink(missing_ok=True)
+    return stale
+
+
+def old_evidence(record_dir: Path, *, days: int = 7) -> list[Path]:
+    """一条记录里**超过 days 天**的可回查证据。
+
+    这是危险清单，只供用户显式执行“彻底清理证据”时使用。常规 run/clean 不会调用。
+    """
+    if days <= 0:
+        return []
+    rd = Path(record_dir)
+    if not rd.is_dir():
+        return []
+    cutoff = time.time() - days * 86400
+    return sorted(
+        p for name in DURABLE_EVIDENCE_NAMES
+        if (p := rd / name).is_file() and p.stat().st_mtime < cutoff
+    )
+
+
+def cleanup_evidence(data_dir: Path, *, days: int = 7, apply: bool = False) -> list[Path]:
+    """显式清理过期证据；apply=False 只报告。
+
+    删除后笔记仍保留，但该记录无法再跑 dystill check，也无法查看当时的转写、
+    画面理解与逐条核对明细。调用方必须在执行前向用户说明这一后果。
+    """
+    data_dir = Path(data_dir)
+    if not data_dir.is_dir() or days <= 0:
+        return []
+    stale: list[Path] = []
+    for d in sorted(data_dir.iterdir()):
+        if d.is_dir():
+            stale += old_evidence(d, days=days)
+    if apply:
+        for p in stale:
+            p.unlink(missing_ok=True)
+    return stale
+
+
+_ORPHAN_MATERIAL_NAMES = ("transcript.txt", "vlm.txt", "check.json", "check.md", "check.html")
+
+
+def orphan_material_dirs(data_dir: Path, *, days: int = 7) -> list[Path]:
+    """有素材、没成品笔记、且已经过期的记录目录。
+
+    这是“清完笔记后留下的素材孤儿”，只在用户显式执行
+    `dystill clean --purge-orphans --apply` 时删除；普通清理不动它，
+    避免把尚未生成笔记的任务误删。
+    """
+    data_dir = Path(data_dir)
+    if not data_dir.is_dir() or days <= 0:
+        return []
+    cutoff = time.time() - days * 86400
+    out: list[Path] = []
+    for d in sorted(data_dir.iterdir()):
+        if not d.is_dir() or (d / "note.md").is_file() or is_stale_dir(d):
+            continue
+        evidence = [d / name for name in _ORPHAN_MATERIAL_NAMES if (d / name).is_file()]
+        if not evidence:
+            continue
+        files = [p for p in d.rglob("*") if p.is_file()]
+        if not files or max(p.stat().st_mtime for p in files) >= cutoff:
+            continue
+        out.append(d)
+    return out
+
+
+def cleanup_orphan_materials(data_dir: Path, *, days: int = 7, apply: bool = False) -> list[Path]:
+    """删除过期且没有 note.md 的素材目录；默认只报告，不删除。"""
+    stale = orphan_material_dirs(data_dir, days=days)
+    if apply:
+        for d in stale:
+            shutil.rmtree(d, ignore_errors=True)
     return stale

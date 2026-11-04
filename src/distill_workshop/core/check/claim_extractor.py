@@ -53,7 +53,11 @@ _TRAILING_TAG_RE = re.compile(r"^([^：:]{1,12})[：:]\s*")
 # 否则 _TRAILING_TAG_RE 会在时间码内部的第一个冒号处咬断（`[02` 命中「≤12 字符 + 冒号」），
 # 剩下 `04] WorkBuddy（腾讯）：` —— 含 2 位数字被判成「数字类」，连观点过滤都绕过，
 # 于是每一条小节标签都变成一条待核对声明（实测 035328：14 条这类碎片，1 条还被判 ✅）。
-_TIMECODE_RE = re.compile(r"^[\[\(（]?\s*\d{1,2}:\d{2}(?::\d{2})?\s*[\]\)）]?\s*")
+_TIMECODE_RE = re.compile(
+    r"^\s*[\[\(（]?\s*\d{1,2}:\d{2}(?::\d{2})?"
+    r"(?:\s*[-–—~至]\s*\d{1,2}:\d{2}(?::\d{2})?)?"
+    r"\s*[\]\)）]?\s*"
+)
 # 整行只是「标签：」链（可嵌套，如 `第一梯队：Codex & Claude Code：`）⇒ 栏目标记，不是声明。
 # 为什么不只看“剥掉一个标签后剩不剩东西”：标签自己会带冒号、也会超过 _TRAILING_TAG_RE 的 12 字上界
 # （`WorkBuddy（腾讯）：` 已 13 字、`DeepSeek Harness架构：` 19 字），那样它们仍会当成声明进核对。
@@ -84,7 +88,7 @@ _STEP_RE = re.compile(r"(点击|打开|输入|粘贴|安装|配置|设置|选择
 
 # 工具链名词黑名单：蒸馏管道自己的名词不该被当成"视频里的专名"来核对
 _PIPELINE_WORDS = {"faster-whisper", "faster_whisper", "PySceneDetect", "scenedetect",
-                   "douyin-downloader", "whisper", "ffmpeg", "yt-dlp", "OpenAI"}
+                   "douyin-downloader", "whisper", "ffmpeg", "OpenAI"}
 
 
 def strip_frontmatter(md: str) -> str:
@@ -212,6 +216,13 @@ def is_checkable(text: str) -> tuple[bool, str]:
         return False, "过短"
     if t in ("无", "暂无", "略") or re.fullmatch(r"(无|暂无|略)[。.]?", t):
         return False, "笔记自己标了「无」"
+    # 模板缺项的固定写法：「无（视频未提及任何工具、模型、价格）」。
+    # 括号里是**为什么没有**的说明，不是对视频的断言。不拦的话它会带着"工具/价格"这类
+    # 词进核对，L2 一旦在画面里撞到"拼多多 -50%"，模型就判 ❌——真实数据里 4 条这类
+    # 缺项全部被误判（2026-11-04 复查，一条图文帖的「工具与资源」栏）。
+    # 只认"整句就是 无（…）"：`无（x）后仍可导出` 这种带后续内容的仍要核。
+    if re.fullmatch(r"(无|暂无|略)\s*[（(][^（）()]*[）)]", t):
+        return False, "模板缺项（无 + 括号说明，不是对视频的断言）"
     if _SYMBOL_ONLY_RE.match(t):
         return False, "符号/标记行（markdown 表格分隔、HTML 注释碎片等）"
     if not re.search(r"[\u4e00-\u9fffA-Za-z0-9]", t):

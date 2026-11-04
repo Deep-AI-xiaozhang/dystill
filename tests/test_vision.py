@@ -10,6 +10,7 @@ from distill_workshop.core.vision import (
     parse_scene_csv,
     resample_indices,
     select_kept,
+    step_scenes,
 )
 
 
@@ -29,6 +30,19 @@ def test_resample_indices_keeps_ends():
     idx = resample_indices(122, 48)
     assert len(idx) == 48 and idx[0] == 0 and idx[-1] == 121 and idx == sorted(set(idx))
     assert resample_indices(10, 1) == [0]
+
+
+def test_cached_frames_respect_reduced_max_frames(tmp_path: Path):
+    """切帧缓存命中也要服从当前上限；改小配置不能继续送全部旧帧。"""
+    frames_dir = tmp_path / "frames"
+    frames_dir.mkdir()
+    for i in range(1, 11):
+        Image.new("RGB", (8, 8), (i * 10, 0, 0)).save(frames_dir / f"{i:03d}.jpg")
+
+    picked = step_scenes(tmp_path / "not-used.mp4", frames_dir, max_frames=3)
+
+    assert [p.name for p in picked] == ["001.jpg", "005.jpg", "010.jpg"]
+    assert len(list(frames_dir.glob("*.jpg"))) == 10   # 只选子集，不破坏缓存
 
 
 def test_parse_scene_csv(tmp_path: Path):
@@ -71,3 +85,24 @@ def test_keep_note_frames_remaps_timecodes(tmp_path: Path):
     assert set(tc) == {p.name for p in picked}          # 只含被选中帧
     first = picked[0].name[:3]                           # "001.jpg" → "001"
     assert tc[picked[0].name] == float(int(first))       # 时间码与源一致
+
+
+def test_step_scenes_narrows_timecodes_on_cache_resample(tmp_path: Path):
+    """缓存帧数超过上限时，时间轴必须同步收窄到真正留下的那几帧。
+
+    回归（2026-11-04）：原来只返回子集、timecodes.json 还是全量，下游按「第 N 张 →
+    排序后第 N 个键」映射，把 001/004/007/010 四帧报成 10/20/30/40 秒（真实 10/40/70/100）。
+    """
+    frames_dir = tmp_path / "frames"
+    frames_dir.mkdir()
+    for i in range(1, 11):
+        (frames_dir / f"{i:03d}.jpg").write_bytes(b"x")
+    (frames_dir / "timecodes.json").write_text(
+        json.dumps({f"{i:03d}.jpg": float(i * 10) for i in range(1, 11)}), encoding="utf-8")
+
+    kept = step_scenes(tmp_path / "dummy.mp4", frames_dir, max_frames=4)
+
+    assert [p.name for p in kept] == ["001.jpg", "004.jpg", "007.jpg", "010.jpg"]
+    tc = json.loads((frames_dir / "timecodes.json").read_text(encoding="utf-8"))
+    assert set(tc) == {p.name for p in kept}            # 时间轴只剩留下的帧
+    assert tc["004.jpg"] == 40.0                        # 且值仍是这一帧自己的秒数

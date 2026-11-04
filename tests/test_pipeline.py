@@ -1,6 +1,8 @@
 import json
 from pathlib import Path
 
+import pytest
+
 from distill_workshop.config import AppConfig
 from distill_workshop.core.ledger import read_events
 from distill_workshop.core.pipeline import (
@@ -97,11 +99,14 @@ def test_transcript_cache_reuse_across_runs(tmp_path: Path):
     jpg = tmp_path / "f.jpg"
     jpg.write_bytes(b"j")
     stt = FakeSTT()
+    vlm_calls = []
     kw = {"stt": stt, "scenes_fn": lambda m, d, n: [jpg],
-              "vlm_fn": lambda f, a, o: VLM_TEXT, "on_step": lambda m: None}
+          "vlm_fn": lambda f, a, o: (vlm_calls.append(1), VLM_TEXT)[1],
+          "on_step": lambda m: None}
     process_record(str(media), app, **kw)
     process_record(str(media), app, **kw)        # 无 note_fn：转写缓存命中，不重转
     assert stt.calls == 1
+    assert len(vlm_calls) == 1                  # 画面理解也必须复用，不能重复烧钱
     events = read_events(app)
     assert len(events) == 2 and all(e["ok"] for e in events)
 
@@ -164,6 +169,7 @@ def test_gallery_pipeline_skips_transcribe_and_frames(tmp_path: Path, monkeypatc
     rd = Path(r["record_dir"])
     assert rd.name == "aweme_7412345678901234567"
     assert (rd / "vlm.txt").exists() and (rd / "note.md").exists()
+    assert r["media"].endswith("1.jpg")                 # 图文帖以第一张图作为素材身份
     assert not (rd / "transcript.txt").exists()          # 图文帖没有转写
     assert stt.calls == 0                                 # STT 完全没碰
     assert len(vlm_calls) == 1 and len(vlm_calls[0]) == 2  # 两张图一起交给 VLM
@@ -227,3 +233,31 @@ def test_note_fn_that_writes_no_note_does_not_report_success(tmp_path: Path):
         assert False, "没有写出笔记不应被当成成功"
     except RuntimeError as e:
         assert "笔记" in str(e)
+
+
+def test_quality_warning_note_is_retried_instead_of_skipped(tmp_path: Path):
+    """自检失败稿可留盘查看，但下次必须重做笔记，不能永远 skipped。"""
+    from distill_workshop.core.artifacts import QUALITY_WARNING_MARKER
+
+    app = make_app(tmp_path)
+    media = tmp_path / "quality.mp4"
+    media.write_bytes(b"fake")
+    jpg = tmp_path / "f.jpg"
+    jpg.write_bytes(b"fake")
+    calls = []
+
+    def note_fn(record_dir, artifacts, app_, on_step):
+        calls.append(1)
+        body = NOTE_TEXT
+        if len(calls) == 1:
+            body += f"\n\n> ⚠️ {QUALITY_WARNING_MARKER}（正文过短），需人工校对补深度\n"
+        (Path(record_dir) / "note.md").write_text(body, encoding="utf-8")
+
+    kwargs = {"stt": FakeSTT(), "scenes_fn": lambda m, d, n: [jpg],
+              "vlm_fn": lambda f, a, o: VLM_TEXT, "note_fn": note_fn,
+              "on_step": lambda m: None}
+    with pytest.raises(RuntimeError, match="笔记"):
+        process_record(str(media), app, **kwargs)
+
+    r = process_record(str(media), app, **kwargs)
+    assert r["status"] == "ok" and len(calls) == 2

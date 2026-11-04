@@ -35,7 +35,7 @@ python -m venv .venv
 # Windows: .venv\Scripts\activate
 # macOS / Linux: source .venv/bin/activate
 pip install -e .                 # 本体；Pillow / scenedetect 随它装
-pip install -e '.[local-stt]'    # 推荐：本地转写 faster-whisper（自动下模型，无需 key）
+pip install -e '.[local-stt]'    # 本地视频/音频主流程必需：faster-whisper（自动下模型，无需 key）
 dystill --version
 ```
 
@@ -95,10 +95,11 @@ dystill run <本地视频或音频文件> --json       # 不碰下载层的最�
 dystill run <抖音链接> --check          # 蒸馏 + 顺手核对（--check 默认 standard，可接 fast/deep）
 dystill check <记录目录|笔记文件|链接> --mode standard
 dystill kb --check                      # 知识库自检；--frontmatter 补字段，-o 指定索引路径
-dystill clean                           # 只报告；--apply 才真删，--cache-days N 改保留天数
+dystill clean                           # 清大文件；--apply 才真删，--cache-days N 改保留天数
+dystill clean --purge-evidence          # 连文本证据也清（之后无法再核对，先征得用户同意）
 ```
 
-- **成功判据**：`run` 打印 `✅ 完成（…）：<记录名>` 且退出码 0；`check` 产出 `check.md` 徽章；`kb --check` 退出码 0（没有 ERROR）。
+- **成功判据**：`run` 打印 `✅ 完成（…）：<记录名>` 且退出码 0；`check` 产出 `check.html` 与 `check.md` 徽章；`kb --check` 退出码 0（没有 ERROR）。
 - **失败了怎么问用户**：429/限流时问「要不要把 `--delay` 调大（如 5），或用 `--retry-failed` 续跑？成功条目不会重复花钱。」
 - **配置项**：`pipeline.judge_provider` / `check_batch_delay` / `check_max_claims` / `cache_keep_days` / `workers`；`workspace.notes_dir` / `data_dir` / `cache_dir`。
 
@@ -147,7 +148,9 @@ dystill kb                                                    # 知识库：汇�
 
 - 默认 `run --check`（standard）一步到位；用户急用可先 `run` 后 `check`。
 - 素材类型自动识别：**视频** / **纯音频**（ffprobe 复核容器内部流，不看后缀）/ **抖音图文帖**（逐图理解，没有语音维度）。图文帖同样生成笔记并走同一套核对，只是没有转写那一路证据。
-- 下载缓存默认保留 7 天（`pipeline.cache_keep_days`），超期文件在 `run` 时自动清理；`dystill clean` 可随时查看/清理（默认只报告，`--apply` 才真删）。
+- 下载缓存、切帧和用完的转写音轨属于大文件，按 `pipeline.cache_keep_days`（默认 7 天）自动清；
+  转写、画面理解、核对报告是回查证据，默认长期保留。`dystill clean` 默认只报告，
+  `--apply` 才删大文件；只有显式 `--purge-evidence` 才会删证据，执行前必须征得用户同意。
 - 模式选择：批量/低价值 → `fast`；日常 → `standard`；关键学习/工作视频 → `deep`。不确定就 standard，**不要替用户静默降模式**。
 - 长笔记超上限会按章节轮转抽样并写进报告——把"哪些没核"如实转述，不许只报 ✅ 数。
 - 429/限流：加大 `--delay`（如 5）或用 `--retry-failed` 续跑，成功条目不重复花钱；`--resume` 完全复用上轮判定、只重建报告。
@@ -158,6 +161,7 @@ dystill kb                                                    # 知识库：汇�
 |---|---|---|
 | `note.md`（顶部含徽章） | 用户 | 给路径 + 徽章一句话总结 |
 | `check.md` | 用户复核 | 转述 ❌ 与 ⚠️ 条目及理由 |
+| `check.html` | 用户复核 | 视频给可点击时间戳/播放器；图文帖给可点击的证据图片和本地看图画廊；优先让用户打开它 |
 | `check.json` | 机器 | 你要精确统计时读它 |
 
 - 徽章措辞是「**已抽核**」，转述时保持这个词（降级理由见 `docs/DECISIONS.md` 的《徽章措辞降级：「已核对」→「已抽核」》）。
@@ -167,8 +171,11 @@ dystill kb                                                    # 知识库：汇�
 ## 已知坑（doctor 未必都报得出来）
 
 - 抖音单视频接口有平台级风控：CLI 会自动切真浏览器兜底；仍失败就走本地文件，**别再折腾 cookie**（见 `docs/DECISIONS.md` 的《抖音单视频下载已被平台封堵》与《抖音风控先回真浏览器兜底》）。
-- B 站链接是可选组件：需 `pip install -e '.[bilibili]'`，缺了 CLI 会报可行动提示。
+- 只支持抖音链接 + 本地文件（B 站等平台分流已移除，D57）；给别的平台链接会收到可行动提示。
 - **HTTP 200 但 `content` 为空 = 失败**，必须换下家。思考型模型开了思考档位时要同时调大 `max_tokens`，否则思考吃掉额度、只剩空正文，会被当成调用失败。
+- `providers[].max_tokens` 是所有请求的硬上限：调用方想生成更长内容也不会越界。
+- 带「初稿质量自检未通过」的 `note.md` 只是供人检查的坏稿，不算完成；下次 `run`
+  会重做笔记并复用已有转写/画面证据。
 - `stt.compute_type` 别写 `int8_float16`：该量化会静默丢整段内容；留空让工具按设备自动选。
 - 模型选型按实测不按新旧，`config.example.yaml` 注释里留了当前结论；换模型先跑 `scripts/vlm_probe.py` + `scripts/model_pick.py`。
 

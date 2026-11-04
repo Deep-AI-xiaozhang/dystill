@@ -11,7 +11,7 @@
 取 play_addr → 用页面上下文自己的 request 下 CDN（与页面同 cookie/UA/指纹链）。
 
 playwright 是**可选依赖**：没装不报错崩溃，抛 BrowserFallbackUnavailable 让上层退回 API 重试，
-本地文件与 B 站路径完全不受影响。
+本地文件路径完全不受影响。
 """
 from __future__ import annotations
 
@@ -21,13 +21,38 @@ from pathlib import Path
 
 import requests
 
-from .download import DownloadError
+from .download import DownloadError, GalleryDetected
 
 # playwright 是可选依赖，装法写进错误信息（用户看到提示就能自己补上）
 _INSTALL_HINT = "pip install -e '.[douyin-browser]' 然后 playwright install chromium"
 _DETAIL_API = "/aweme/v1/web/aweme/detail/"
 _MIN_BYTES = 100 * 1024            # 小于这个体积基本是错误页而非视频
 _BAD_FILENAME_CHARS = re.compile(r'[\\/:*?"<>|\r\n\t]+')
+
+
+def gallery_image_urls(items: list[dict]) -> list[str]:
+    """从页面 img 元数据里挑出图文帖正文大图，过滤头像、图标和重复图。"""
+    out: list[str] = []
+    seen: set[str] = set()
+    for item in items:
+        url = str((item or {}).get("src") or "").strip()
+        try:
+            width = int((item or {}).get("naturalWidth") or 0)
+            height = int((item or {}).get("naturalHeight") or 0)
+        except (TypeError, ValueError):
+            continue
+        if not url.startswith("http") or "avatar" in url.lower():
+            continue
+        # 正文图文卡片通常是竖图；头像和 UI 图标通常为方形。
+        if width < 600 or height < width * 1.08:
+            continue
+        from urllib.parse import urlsplit
+        key = urlsplit(url).path
+        if key in seen:
+            continue
+        seen.add(key)
+        out.append(url)
+    return out
 
 
 class BrowserFallbackUnavailable(DownloadError):
@@ -83,6 +108,45 @@ def looks_like_mp4(body: bytes) -> bool:
     只判体积是不够的：CDN 错误页也能超过 100KB，存下来会在下游切帧/转写阶段才炸。
     """
     return len(body) >= 12 and body[4:8] == b"ftyp"
+
+
+def response_json_or_none(response):
+    """浏览器响应回调专用：页面关闭/响应过大/非 JSON 都只忽略，不向控制台喷堆栈。"""
+    try:
+        return response.json()
+    except Exception:  # noqa: BLE001 —— 回调里的异常会污染日志，且不影响主下载流程
+        return None
+
+
+def _download_gallery_images(ctx, page, dl: Path, final_url: str) -> list[Path]:
+    """从已打开的图文帖页面下载正文大图，返回本地路径。"""
+    match = re.search(r"/(?:video|note)/(\d{6,})", final_url or "")
+    if not match:
+        return []
+    aweme_id = match.group(1)
+    try:
+        items = page.evaluate("""() => [...document.querySelectorAll('img')].map(img => ({
+            src: img.src,
+            naturalWidth: img.naturalWidth,
+            naturalHeight: img.naturalHeight
+        }))""")
+    except Exception:  # noqa: BLE001 —— 页面已关闭时安全放弃，交给上层报错
+        return []
+    out: list[Path] = []
+    for index, url in enumerate(gallery_image_urls(items), 1):
+        try:
+            resp = ctx.request.get(url, timeout=60_000)
+            if not resp.ok:
+                continue
+            body = resp.body()
+            if len(body) < 1024:
+                continue
+            path = Path(dl) / f"note_{aweme_id}_{index:02d}.jpg"
+            path.write_bytes(body)
+            out.append(path)
+        except Exception:  # noqa: BLE001,S112 —— 单张图失败不影响其余图片
+            continue
+    return out
 
 
 def _stream_via_requests(ctx, page, url: str, out: Path) -> tuple[bool, str]:
@@ -149,10 +213,9 @@ def download_via_browser(url: str, dl: Path, *, timeout_ms: int = 90_000) -> Pat
 
                 def _on_response(resp):
                     if _DETAIL_API in resp.url:
-                        try:
-                            seen.append(resp.json())
-                        except (ValueError, TypeError):
-                            pass  # 非 JSON 响应（如预检/错误页）直接忽略
+                        data = response_json_or_none(resp)
+                        if data is not None:
+                            seen.append(data)
 
                 page.on("response", _on_response)
                 page.goto(url, wait_until="domcontentloaded", timeout=timeout_ms)
@@ -165,12 +228,21 @@ def download_via_browser(url: str, dl: Path, *, timeout_ms: int = 90_000) -> Pat
                 detail = next(((d or {}).get("aweme_detail") for d in seen
                                if (d or {}).get("aweme_detail")), None)
                 if detail is None:
+                    images = _download_gallery_images(ctx, page, dl, page.url)
+                    if images:
+                        raise GalleryDetected(
+                            f"图文帖（页面内找到 {len(images)} 张图片）", images=images)
                     raise BrowserFallbackFailed(
                         f"浏览器未能拿到视频详情（页面：{final_url}）；"
                         f"可能是链接失效、需要登录或该作品仅 App 可见")
 
                 urls = play_addr_urls(detail)
                 if not urls:
+                    images = _download_gallery_images(ctx, page, dl, page.url)
+                    if images:
+                        raise GalleryDetected(
+                            f"图文帖（详情无播放地址，找到 {len(images)} 张图片）",
+                            images=images)
                     raise BrowserFallbackFailed("详情里没有 play_addr（疑似图文帖或受限作品）")
                 out = dl / media_filename(detail, final_url)
 

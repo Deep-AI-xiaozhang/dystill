@@ -50,7 +50,12 @@ from distill_workshop.core.check.models import (
     Claim,
     Evidence,
 )
-from distill_workshop.core.check.report import apply_fixes, inject_badge
+from distill_workshop.core.check.report import (
+    apply_fixes,
+    inject_badge,
+    render_html,
+    write_reports,
+)
 from distill_workshop.core.check.verifier import (
     apply_gates,
     build_items,
@@ -325,6 +330,16 @@ def test_section_label_lines_are_not_claims():
     assert [c.context for c in claims] == ["", "优势1", "开场"]
 
 
+def test_timecode_ranges_are_removed_from_claim_text():
+    """`[00:19-00:27]` 是一个时间范围，不能把结尾的 27 留进声明。"""
+    note = ("## 二、视频内容\n\n"
+            "- [00:19-00:27] 这类视频可以接单代做，也可以发布在自己的账号上。\n")
+    claims, _ = extract_by_rules(note, get_mode("standard"))
+    assert claims
+    assert claims[0].text == "这类视频可以接单代做，也可以发布在自己的账号上"
+    assert claims[0].original.startswith("[00:19-00:27]")
+
+
 def test_nested_label_chain_is_a_label():
     """相邻标签行会被短句合并成 `口播要点：，用户分类与对策：`——整行只是标签链，同样不是声明。"""
     note = ("## 二、视频内容\n\n- **口播要点**：\n- **用户分类与对策**：\n"
@@ -392,6 +407,98 @@ def test_retrieve_scores_and_timestamp():
     assert zero < 0.5
 
 
+def test_vlm_frame_parts_are_grouped_for_retrieval():
+    """同一张图的标题、正文和场景说明必须一起交给模型，不能只送半块。"""
+    txt = (
+        "--- 第 10 张图（012.jpg） ---\n"
+        "### 1. 画面中出现的文字\n"
+        "1 请用代码制作一支原创知识动画。\n"
+        "4 时长:【60 或 90 秒】;画幅:1080x1920。\n\n"
+        "---\n\n"
+        "### 3. 界面 / 场景\n"
+        "画面主体是一张提示词模板卡片。"
+    )
+    idx = SourceIndex.build("", txt)
+    units = idx.vlm_units()
+    frame_10 = [u for u in units if u.frame == 10]
+    assert len(frame_10) == 1
+    assert "1080x1920" in frame_10[0].text
+    assert "提示词模板卡片" in frame_10[0].text
+
+    _score, ev = idx.retrieve("第3行：主题:【填写一个具体问题】", top_k=1, window=0)
+    assert any("1080x1920" in e.text or "原创知识动画" in e.text for e in ev)
+
+    noisy = (
+        "--- 第 1 张图（001.jpg） ---\n"
+        "F1ONLY 这是相邻帧的无关内容。\n\n"
+        "--- 第 2 张图（002.jpg） ---\n"
+        "画幅:1080x1920\n\n"
+        "--- 第 3 张图（003.jpg） ---\n"
+        "F3ONLY 这是另一张相邻帧的无关内容。"
+    )
+    idx2 = SourceIndex.build("", noisy)
+    _score2, ev2 = idx2.retrieve("画幅:1080x1920")
+    joined2 = "\n".join(e.text for e in ev2)
+    assert "1080x1920" in joined2
+    assert "F1ONLY" not in joined2 and "F3ONLY" not in joined2
+
+
+def test_numeric_hard_fact_pins_relevant_far_segment():
+    """长复合声明里的 2028 不能因为排在远处就被丢掉。"""
+    transcript = (
+        "[00:05] Voxel 开放预约，交订金就能排队\n"
+        "[00:12] 2028年发货\n"
+        "[00:30] 特斯拉新 Roadster 倒挂行驶\n"
+        "[00:32] 还能喷着气短暂飞起来\n"
+        "[00:36] 马斯克说 2028年量产\n"
+    )
+    idx = SourceIndex.build(transcript, "")
+    claim = "特斯拉新 Roadster 和家务机器人 Voxel 的时间节点均为 2028 年"
+    _score, ev = idx.retrieve(claim, top_k=1, window=2)
+    joined = "\n".join(e.text for e in ev)
+    assert "2028年发货" in joined
+    assert "喷着气" in joined
+
+
+def test_business_leap_does_not_flag_media_transition_words():
+    from distill_workshop.core.check.evidence_retriever import business_leap
+
+    assert business_leap("拆解图形运动方式与画面承接逻辑", "画面怎么接") == []
+
+
+def test_business_leap_accepts_spoken_daizuo_synonym():
+    from distill_workshop.core.check.evidence_retriever import business_leap
+
+    source = "这种视频你可以直接代做，也可以发自己的账号"
+    assert business_leap("这类视频可以接单代做，也可以发布在自己的账号", source) == []
+
+
+def test_business_leap_ignores_api_and_financial_pricing_terms():
+    from distill_workshop.core.check.evidence_retriever import business_leap
+
+    assert business_leap(
+        "Physical Intelligence：提供机器人云端训练API服务",
+        "Physical Intelligence 开放了 API，你把机器人数据传上去，它在云上帮你训练",
+    ) == []
+    assert business_leap(
+        "当前注册尚未正式生效，发行股数与定价均未确定",
+        "目前注册尚未正式生效，发行股数与定价尚未确定",
+    ) == []
+
+
+def test_verifier_prompt_keeps_relevant_tail_of_longish_evidence():
+    from distill_workshop.core.check.verifier import build_items
+
+    long_evidence = "开头说明" * 120 + "输出位置:【填写新的项目文件夹】"
+    c = Claim(
+        cid="C01",
+        text="某条需要核对的声明",
+        evidence=[Evidence(source="vlm", text=long_evidence, fact_hit=1.0)],
+    )
+    prompt = build_items([c])
+    assert "输出位置" in prompt and "某条需要核对的声明" in prompt
+
+
 def test_greedy_pick_covers_claim_parts_not_repeated_parts():
     """选段按「新增覆盖」贪心，不按单段分取前几名。
 
@@ -431,6 +538,16 @@ def test_gate_missing_number_blocks_ok():
     assert c.verdict == VERDICT_DOUBT and "查不到" in c.reason
 
 
+def test_gate_number_mismatch_with_number_present_is_doubt():
+    """同一画面有左右多个截图时，不能拿另一张截图的数字判明确矛盾。"""
+    c = Claim(cid="C25", text="6000-7000元（标题显示6500一个月）",
+              kind=KIND_NUMBER, verdict=VERDICT_MISMATCH,
+              evidence=[Evidence(source="vlm", text="左侧5000-6000元，右侧6000-7000元", score=1.0)])
+    apply_gates(c, get_mode("standard"))
+    assert c.verdict == VERDICT_DOUBT
+    assert "另一块截图" in c.reason
+
+
 def test_num_variants_and_cn_number_matching():
     assert "两百" in num_variants("200") and "二百" in num_variants("200")
     assert "5点3" in num_variants("5.3")
@@ -448,6 +565,15 @@ def test_hard_miss_ignores_common_words():
     assert names == {"computer", "use"}
 
 
+def test_hard_facts_normalizes_thousands_and_trailing_zero():
+    """金额格式差异不是事实差异：13,000.00 与 13000 应视为同一个数。"""
+    nums, _ = hard_facts("+13,000.00")
+    assert nums == {"13000"}
+    assert hard_miss("+13,000.00", "到账 13000")[0] == []
+    assert hard_miss("+13,000.00", "到账 13,000.00")[0] == []
+    assert hard_miss("5.3", "数值 5.30")[0] == []
+
+
 def test_hard_miss_number_boundary_not_substring():
     """数字命中必须带边界：200 不能从 2000 / 1200 里找到出处（B1）。"""
     # 声明 200，原素材只有 2000 → 必须判缺失（此前子串匹配会漏判）
@@ -461,6 +587,22 @@ def test_hard_miss_number_boundary_not_substring():
     # 中文数字同理：「四十」不命中「四十万」（口播量级与笔记数字是两回事）
     nums4, _ = hard_miss("总量 40", "视频说总量四十万")
     assert nums4 == ["40"]
+
+
+def test_hard_facts_ignores_timecodes_and_line_numbers():
+    """时间码和笔记行号不是声明里的硬事实。"""
+    nums, _ = hard_facts("[00:00-00:07] 收费 20 元")
+    assert nums == {"20"}
+
+    nums2, _ = hard_facts("第3行：主题:【填写一个具体问题】")
+    assert nums2 == set()
+
+
+def test_hard_miss_matches_units_and_zero_padded_numbers():
+    """100万、步骤03这类数字在原素材里有同一数值时不能误报缺失。"""
+    assert hard_miss("上下文达100万Token", "上下文100万token")[0] == []
+    assert hard_miss("步骤 03：解压文件", "步骤 03：解压文件")[0] == []
+    assert hard_miss("画幅:1080x1920", "画幅:1080x1920")[0] == []
 
 
 def test_hard_facts_ignores_frame_numbers():
@@ -519,6 +661,16 @@ def test_business_leap_quiet_when_source_has_the_word():
 
     src = "这个工具是收费的，我给别人提供服务收 200 一次"
     assert business_leap("提供竞品调研服务", src) == []
+
+
+def test_business_leap_accepts_common_money_synonyms():
+    """原素材说“赚钱/接广告/做一单”，笔记写“变现/接单”是正常概括。"""
+    from distill_workshop.core.check.evidence_retriever import business_leap
+
+    source = "发现真正赚钱的就这几条路 长粉丝接广告 做FDE随便做一单"
+    assert business_leap("这是一条变现路径", source) == []
+    assert business_leap("通过做FDE接单赚钱", source) == []
+    assert business_leap("商业广告变现", "带带货接广告") == []
 
 
 def test_business_leap_ignores_generic_verbs():
@@ -664,6 +816,79 @@ def test_badge_and_json_shape():
     assert "核对边界" in md and "C03" in md
 
 
+def test_render_html_has_clickable_local_timestamps(tmp_path: Path):
+    media = tmp_path / "video.mp4"
+    media.write_bytes(b"fake video")
+    record = tmp_path / "record"
+    record.mkdir()
+    (record / "meta.json").write_text(
+        json.dumps({"media": str(media), "media_type": "video"}, ensure_ascii=False),
+        encoding="utf-8")
+    r = CheckResult(key="aweme:1", mode="standard", created_at="2026-10-25 12:00:00",
+                    claims=[Claim("C01", "<script>alert(1)</script>", verdict=VERDICT_OK,
+                                  evidence=[Evidence("transcript", "证据原文", ts="01:23")])])
+
+    page = render_html(r, record)
+
+    assert 'data-seek="83"' in page
+    assert 'id="player"' in page
+    assert media.resolve().as_uri() in page
+    assert "&lt;script&gt;alert(1)&lt;/script&gt;" in page
+    assert "<script>alert(1)</script>" not in page
+
+
+def test_render_html_explains_missing_media(tmp_path: Path):
+    record = tmp_path / "record"
+    record.mkdir()
+    (record / "meta.json").write_text(
+        json.dumps({"media": str(tmp_path / "gone.mp4")}), encoding="utf-8")
+    r = CheckResult(key="aweme:1", mode="standard", claims=[
+        Claim("C01", "声明", verdict=VERDICT_DOUBT,
+              evidence=[Evidence("transcript", "证据", ts="01:23")])
+    ])
+
+    page = render_html(r, record)
+
+    assert 'id="player"' not in page
+    assert "原片已不在本机" in page
+    assert 'class="seek" data-seek=' not in page
+
+
+def test_render_html_gallery_has_local_image_viewer(tmp_path: Path):
+    record = tmp_path / "record"
+    record.mkdir()
+    image1 = record / "01.jpg"
+    image2 = record / "02.jpg"
+    image1.write_bytes(b"fake image 1")
+    image2.write_bytes(b"fake image 2")
+    (record / "meta.json").write_text(json.dumps({
+        "media_type": "gallery",
+        "images": [str(image1), str(image2)],
+    }), encoding="utf-8")
+    r = CheckResult(key="aweme:note", mode="standard", claims=[
+        Claim("C01", "第 2 张图显示标题", verdict=VERDICT_OK,
+              evidence=[Evidence("vlm", "第 2 张图显示标题", ts="")])
+    ])
+
+    page = render_html(r, record)
+
+    assert 'id="player"' not in page
+    assert 'id="gallery"' in page
+    assert 'data-gallery-index="1"' in page
+    assert image1.resolve().as_uri() in page
+    assert "本地看图画廊" in page
+
+
+def test_write_reports_includes_html(tmp_path: Path):
+    record = tmp_path / "record"
+    r = CheckResult(key="aweme:1", mode="standard", claims=[
+        Claim("C01", "声明", verdict=VERDICT_OK)
+    ])
+    paths = write_reports(record, r)
+    assert Path(paths["html"]).is_file()
+    assert "把每一句话" in Path(paths["html"]).read_text(encoding="utf-8")
+
+
 def test_inject_badge_is_idempotent():
     r = CheckResult(key="k", mode="standard", created_at="2026-09-17 10:00:00",
                     claims=[Claim("C01", "a", verdict=VERDICT_OK)])
@@ -782,7 +1007,8 @@ def test_mode_override_does_not_pollute_global_modes(tmp_path: Path):
 
 
 def test_resume_reuses_previous_verdicts(tmp_path: Path):
-    """断点续跑：已判定的条目不再送进 L3 判定（低配额通道被限流打断后的恢复手段）。"""
+    """断点续跑：L1/L3 都不调模型，已有判定原样复用。"""
+    from distill_workshop.config import ProviderConfig
     from distill_workshop.core.check import analyze
     from distill_workshop.core.check.engine import load_previous
     app = make_app(tmp_path)
@@ -791,16 +1017,19 @@ def test_resume_reuses_previous_verdicts(tmp_path: Path):
 
     first = run_check(rd, app, mode="fast", chat_fn=fake_chat, on_step=None)
     assert first["counts"]["total"] > 0
-    l3_asks = []
+    all_asks = []
 
     def counting_chat(messages, **_kw):
-        if "事实核对员" in messages[0]["content"]:
-            l3_asks.append(1)
+        all_asks.append(messages[0]["content"])
         return fake_chat(messages)
 
-    res = analyze(note, TRANSCRIPT, VLM, mode="fast", chat_fn=counting_chat,
+    # 故意打开 L1 模型消歧并给 app 配好 provider：resume 仍必须一个模型都不调。
+    app.pipeline["check_l1_disambiguate"] = True
+    app.providers = [ProviderConfig(name="text", api_base="https://x/v1",
+                                    api_key="k", model="m")]
+    res = analyze(note, TRANSCRIPT, VLM, mode="fast", app=app, chat_fn=counting_chat,
                   previous=load_previous(rd), resume=True, on_step=None)
-    assert l3_asks == []                          # L3 一次都没调（L1 消歧仍会跑）
+    assert all_asks == []
     assert all(c.verdict for c in res.claims)
     assert res.count("ok") == first["counts"]["ok"]
 
@@ -850,6 +1079,33 @@ def test_resume_still_applies_new_gates(tmp_path: Path):
     assert hit[0].verdict != "ok"              # 第三道闸把旧的 ✅ 压下来了
 
 
+def test_resume_with_unmatched_old_report_never_calls_model(tmp_path: Path):
+    """旧报告缺的新声明只能记存疑，不能为了补判定偷偷调用模型。"""
+    from distill_workshop.core.check import analyze
+    from distill_workshop.core.check.engine import load_previous
+
+    app = make_app(tmp_path)
+    rd = make_record(tmp_path)
+    note = (rd / "note.md").read_text(encoding="utf-8")
+    run_check(rd, app, mode="fast", chat_fn=fake_chat, on_step=None)
+    previous = load_previous(rd)
+    previous = {next(iter(previous)): next(iter(previous.values()))}  # 只留一条
+    calls = []
+
+    res = analyze(note, TRANSCRIPT, VLM, mode="fast", chat_fn=lambda m: calls.append(m),
+                  previous=previous, resume=True, on_step=None)
+
+    assert calls == []
+    assert any("上一轮报告没有这条声明" in c.reason for c in res.claims)
+
+
+def test_resume_without_previous_report_fails_clearly(tmp_path: Path):
+    app = make_app(tmp_path)
+    rd = make_record(tmp_path)
+    with pytest.raises(ValueError, match="没有上一轮核对结果"):
+        run_check(rd, app, mode="fast", chat_fn=fake_chat, resume=True, on_step=None)
+
+
 def load_previous_path(rd: Path) -> dict:
     import json as _json
     data = _json.loads((rd / "check.json").read_text(encoding="utf-8"))
@@ -882,6 +1138,7 @@ def test_recheck_same_record_twice(tmp_path: Path):
     second = run_check(rd, app, mode="fast", chat_fn=fake_chat, on_step=None)
     assert first["status"] == "checked" and second["status"] == "checked"
     assert (rd / "check.md").is_file()
+    assert (rd / "check.html").is_file()
 
 
 def test_resolve_record_dir_by_aweme_and_keyword(tmp_path: Path):
@@ -1110,3 +1367,38 @@ def test_disambiguation_splits_by_index_not_by_order():
     assert out[2].text == "丙丙丙丙丙丙" and out[2].section == "S2"   # 跟着乙条走
     assert out[1].original == "乙乙乙乙乙乙"      # 拆分首条保留原句（供 --rewrite）
     assert out[2].original == ""                  # 拆出的次条不重复携带原句
+
+
+def test_is_checkable_skips_template_none_with_explanation():
+    """模板缺项「无（说明）」不是对视频的断言，必须跳过。
+
+    回归（2026-11-04）：真实数据里 4 条这类缺项全部被误判（含 1 条 ❌）——
+    `无（视频未提及任何工具、价格、链接）` 带着"工具/价格"进核对，
+    L2 撞到画面里的"拼多多 -50%" 就判成了矛盾。
+    """
+    for text in ("无（视频未提及任何工具、模型、插件、价格、链接）",
+                 "无（不适用）",
+                 "无（本条为图文帖，无语音内容）",
+                 "暂无（未提供）"):
+        ok, why = is_checkable(text)
+        assert ok is False and "模板缺项" in why
+    # 带后续内容的不是纯缺项，仍然要核
+    assert is_checkable("无（x）后仍可导出")[0] is True
+    assert is_checkable("无网络时不可用")[0] is True
+
+
+def test_vlm_ts_uses_filename_not_frame_ordinal(tmp_path: Path):
+    """帧集合被重采样后，画面证据的时间戳必须按文件名查，不能按序号数。
+
+    回归（2026-11-04）：001/004/007/010 四帧曾被报成 10/20/30/40 秒（真实 10/40/70/100）。
+    """
+    frames = tmp_path / "frames"
+    frames.mkdir()
+    (frames / "timecodes.json").write_text(
+        json.dumps({"001.jpg": 10.0, "004.jpg": 40.0, "007.jpg": 70.0, "010.jpg": 100.0}),
+        encoding="utf-8")
+    vlm = "\n\n".join(f"--- 第 {i} 张图（{name}） ---\n文字{i}"
+                      for i, name in enumerate(["001.jpg", "004.jpg", "007.jpg", "010.jpg"], 1))
+    idx = SourceIndex.build("", vlm, frames)
+    got = {seg.frame_name: idx._vlm_ts(seg.frame, seg.frame_name) for seg in idx.vlm_units()}
+    assert got == {"001.jpg": "00:10", "004.jpg": "00:40", "007.jpg": "01:10", "010.jpg": "01:40"}

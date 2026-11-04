@@ -100,6 +100,7 @@ def test_prompt_is_pure_knowledge_template():
     # 营销栏目只能在「禁止出现」那句原则里提到一次，不能当成模板栏目
     for banned in ("变现", "转化链路", "内容公式"):
         assert prompt.count(banned) == 1
+    assert "不要擅自升级判断强度" in prompt
 
 
 def test_chunk_text_cap_rebalance():
@@ -175,3 +176,24 @@ def test_default_note_fn_writes_frontmatter(tmp_path: Path):
     note = (rd / "note.md").read_text(encoding="utf-8")
     assert note.startswith("---") and "title: 测试视频" in note
     assert "7412345678901234567" not in note.split("\n\n")[0]  # 尾部 id 已从标题清洗
+
+
+def test_yaml_scalar_keeps_frontmatter_parseable():
+    """frontmatter 里的标题/键必须写成 YAML 安全的标量。
+
+    回归（2026-11-04）：抖音标题带 `#话题` 是常态，`title: #AI新星计划 …` 会被当成注释
+    （解析成 None）；`- 破折号开头` 直接 ScannerError；纯数字标题被转成 int。
+    """
+    import yaml
+
+    from distill_workshop.core.frontmatter import unquote_scalar, yaml_scalar
+
+    cases = ["#AI新星计划 抖音精选", "- 破折号开头", "2026", "1.5", "true",
+             "A: B: C", "& 锚点", "% 百分号", "[方括号]", "普通中文标题", ""]
+    for raw in cases:
+        written = yaml_scalar(raw)
+        fm = yaml.safe_load(f"title: {written}\nkey: aweme:1\n")
+        assert fm["title"] == raw, f"{raw!r} 写出 {written!r} 后读回 {fm['title']!r}"
+        assert unquote_scalar(written) == raw
+    # 中文标题不加引号，保持可读性
+    assert yaml_scalar("普通中文标题") == "普通中文标题"

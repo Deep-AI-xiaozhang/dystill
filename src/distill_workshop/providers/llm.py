@@ -67,8 +67,13 @@ def chat(messages: list[dict], providers: list[ProviderConfig],
         raise LLMError("没有可用的 provider：请配置 config.yaml 或设置 DISTILL_API_KEY/DISTILL_API_BASE/DISTILL_MODEL")
     errors: list[str] = []
     for p in providers:
-        # 调用方没指定时，退到该 provider 自己的硬上限（免费模型常有 [1,1024] 这类限制）
-        mt = max_tokens if max_tokens is not None else (p.max_tokens or None)
+        # provider.max_tokens 是硬上限，不是"没传时才用的默认值"：调用方要 6000，
+        # 供应商只允许 1024 时必须压到 1024，否则请求参数会直接被接口拒绝。
+        provider_limit = p.max_tokens if p.max_tokens > 0 else None
+        if max_tokens is not None and provider_limit is not None:
+            mt = min(max_tokens, provider_limit)
+        else:
+            mt = max_tokens if max_tokens is not None else provider_limit
         for attempt in range(1, p.max_attempts + 1):
             try:
                 content = _chat_once(p, messages, temperature, timeout, mt)

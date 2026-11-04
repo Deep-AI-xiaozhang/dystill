@@ -1,20 +1,21 @@
 """下载层（移植自早期实现的下载层实测修复）。
 
-四条铁律，全部来自真实事故：
+三条铁律，全部来自真实事故：
 1. 时间窗口判别（v82 事故）：本次下载结果只认窗口内新出现的 mp4 / 新图片 / 被改写文件，
    绝不回退扫全目录——批量场景会误取上一视频的遗留文件，产出张冠李戴的笔记。
 2. manifest 身份复用（2026-09-01 风控兜底）：下载失败时按 aweme_id 查历史记录复用，
    身份校验三重（manifest 记录 + 文件在 before 集合 + 文件名含 aweme_id），展开失败安全放弃。
-3. B站必须带 Referer + UA（HTTP 412 实测），且与抖音分流（douyin-downloader 会抓错视频）。
-4. 抖音风控先回浏览器（2026-09-17 实测）：毫秒级 403/空 200 是「纯 HTTP 客户端指纹被识破」，
+3. 抖音风控先回浏览器（2026-09-17 实测）：毫秒级 403/空 200 是「纯 HTTP 客户端指纹被识破」，
    退避重试救不了，先切真浏览器兜底（core/browser_download.py）再退避重试 API。
 
 架构改进：图文帖用类型化异常 GalleryDetected（替代字符串匹配）；
 短链解析器可注入（网络逻辑可测试）；风控型瞬时失败用 RiskControlDetected 与确定性失败分开。
+
+**平台范围只有抖音**（D57，2026-11-04）：B 站分流已移除。本地文件/纯音频/图文帖照常可用，
+它们不依赖任何平台下载器。别的平台链接会明确报「只支持抖音」而不是静默失败。
 """
 from __future__ import annotations
 
-import importlib.util
 import json
 import os
 import random
@@ -71,13 +72,14 @@ DOUYIN_BLOCKED_HINT = (
     "本项目已自动尝试真浏览器兜底，走到这里说明兜底也没成。能走通的路：\n"
     "  ① 装上浏览器兜底：pip install -e '.[douyin-browser]' 然后 playwright install chromium\n"
     "  ② 本地文件：自己把视频存下来，再 `dystill run <文件路径>` 直接蒸馏（永远可用）\n"
-    "  ③ 换源：同一内容若在 B 站等平台也有，给那个链接（B 站走 yt-dlp，可选组件：pip install 'dystill[bilibili]'）\n"
     "  实测记录见 docs/DECISIONS.md D11 / D13"
 )
 
 # 下载器输出里出现这些词即判为风控型失败（对齐 core/api_client.py 的 _RISK_CONTROL_HTTP_STATUSES）
 _RISK_HINT_RE = re.compile(
     r"403|429|安全验证|验证码|anti-?bot|risk|Empty 200|风控|请先登录|未登录", re.IGNORECASE)
+# 已移除的平台：只用来给"这条链接为什么不行 + 该怎么办"的可行动提示（D57）
+_BILIBILI_RE = re.compile(r"(?i)(bilibili\.com|b23\.tv)")
 _DL_BACKOFF_S = (30, 90)   # 第 2、3 次尝试前分别等待（再叠 0~10s 抖动，避免同刻撞限频）
 
 # 下载器真正认的登录态三项：sessionid=登录态，ttwid+msToken=接口必需（对齐 auth/cookie_manager.py）
@@ -155,6 +157,33 @@ def reuse_downloaded(url: str, dl: Path, before: set[Path],
         if cand.exists() and cand in before and cand.stat().st_size > 0 and aweme_id in cand.name:
             return cand
     return None
+
+
+def cached_media_by_aweme(dl: Path, aweme_id: str | None) -> Path | None:
+    """按 aweme_id 复用本机缓存视频（含浏览器兜底产物，不依赖第三方 manifest）。
+
+    浏览器兜底不会写 download_manifest.jsonl；若只信 manifest，续跑会再次访问平台，
+    明明视频已在本机却重新撞风控。ID 必须作为独立数字段出现，防 111 误中 1110。
+    """
+    if not aweme_id:
+        return None
+    pattern = re.compile(rf"(?<!\d){re.escape(aweme_id)}(?!\d)")
+    candidates = [
+        p for p in Path(dl).rglob("*.mp4")
+        if p.is_file() and p.stat().st_size > 0 and pattern.search(p.name)
+    ]
+    return max(candidates, key=lambda p: p.stat().st_mtime) if candidates else None
+
+
+def cached_gallery_by_aweme(dl: Path, aweme_id: str | None) -> list[Path]:
+    """按 aweme_id 复用本机缓存图文帖图片。"""
+    if not aweme_id:
+        return []
+    pattern = re.compile(rf"(?<!\d){re.escape(aweme_id)}(?!\d)")
+    imgs = sorted(p for p in Path(dl).rglob("*")
+                  if p.is_file() and p.suffix.lower() in {".jpg", ".jpeg", ".png", ".webp"}
+                  and p.stat().st_size > 0 and pattern.search(p.name))
+    return imgs
 
 
 def manifest_gallery_files(url: str, dl: Path, aweme_id: str | None = None) -> list[Path]:
@@ -326,6 +355,17 @@ def _download_douyin(url: str, dl: Path, dcfg: DownloadConfig, work_dir: Path,
     """抖音下载编排：cookie 体检 → API 一次 → **风控先切真浏览器**（指纹型 403 退避无效）
     → 浏览器不行再退避重试 API → 全失败才给可行动提示。
     """
+    aweme = aweme_id_from_url(url)
+    cached = cached_media_by_aweme(dl, aweme)
+    if cached:
+        _tell(on_step, f"   ♻️ 复用本机已下载视频：{cached.name}")
+        return cached
+
+    cached_imgs = cached_gallery_by_aweme(dl, aweme)
+    if cached_imgs:
+        _tell(on_step, f"   ♻️ 复用本机已下载图文帖：{len(cached_imgs)} 张图片")
+        raise GalleryDetected(f"图文帖（复用本机已缓存图片 {len(cached_imgs)} 张）", images=cached_imgs)
+
     ok, why = cookie_health(dcfg, work_dir)
     _tell(on_step, f"   cookie 体检：{why}" if ok else f"⚠️ cookie 体检不通过：{why}")
     if not ok:
@@ -377,46 +417,15 @@ def _try_browser_fallback(url: str, dl: Path, on_step=None) -> Path | None:
     return media
 
 
-def _yt_dlp_available() -> bool:
-    """yt-dlp 是否可用（独立成函数：可选依赖的可测试接缝）。"""
-    return importlib.util.find_spec("yt_dlp") is not None
-
-
-def _download_bilibili(url: str, dl: Path) -> Path:
-    """yt-dlp 下载 B站（≤720p）。铁律 3：必须带 Referer + UA，否则 412。
-
-    yt-dlp 是可选组件（`dystill[bilibili]`）：产品定位只做抖音，不该让所有人背着 B 站下载器。
-    没装时不裸抛子进程报错，给可行动的补救路径。
-    """
-    if not _yt_dlp_available():
-        raise DownloadError(
-            "B站下载依赖 yt-dlp，它是可选组件、当前没装。能走通的路：\n"
-            "  ① 装上再跑：pip install 'dystill[bilibili]'（源码安装：pip install -e '.[bilibili]'）\n"
-            "  ② 不装：同一内容若在抖音也有，给抖音链接；或先把视频存到本地，"
-            "`dystill run <文件路径>` 直接蒸馏（永远可用）"
-        )
-    before = {p.resolve() for p in dl.rglob("*.mp4")}
-    r = run([sys.executable, "-m", "yt_dlp", "-f", "bv*+ba/b", "-S", "res:720",
-             "--merge-output-format", "mp4", "-o", str(dl / "%(id)s_%(title).80s.%(ext)s"),
-             "--no-playlist", "--no-progress", "--retries", "3",
-             "--referer", "https://www.bilibili.com/", "--user-agent", _UA, url])
-    if r.returncode != 0:
-        raise DownloadError("B站下载失败: " + (r.stderr or "")[-400:])
-    vids = [p for p in dl.rglob("*.mp4") if p.resolve() not in before]
-    if not vids:  # yt-dlp 对已存在文件跳过且返回 0：按 BV 号回认，保证重跑幂等
-        m = re.search(r"(BV[0-9A-Za-z]{8,12})", url)
-        if m:
-            vids = [p for p in dl.rglob("*.mp4") if m.group(1).lower() in p.name.lower()]
-    if not vids:
-        raise DownloadError("B站下载完成但未找到 mp4")
-    return max(vids, key=lambda p: p.stat().st_size)
-
-
 # ── 统一入口 ─────────────────────────────────────────────────
 def step_download(url: str, app: AppConfig, on_step=None) -> Path:
-    """按平台分流下载，返回媒体文件路径。
-    本地文件直接返回；B站走 yt-dlp；抖音走 douyin-downloader（图文帖抛 GalleryDetected，
-    撞风控时自动切真浏览器兜底再退避重试）。on_step 是进度回调（默认静默）。"""
+    """下载：本地文件直接返回，抖音链接走 douyin-downloader
+    （图文帖抛 GalleryDetected，撞风控时自动切真浏览器兜底再退避重试）。
+    on_step 是进度回调（默认静默）。
+
+    平台范围只有抖音（D57）。别的平台链接给可行动提示，而不是抛一句看不出怎么办的
+    「不支持的平台」——用户手里那条链接多半是 B 站/YouTube，需要知道下一步能做什么。
+    """
     p = Path(url)
     if p.is_file():
         return p
@@ -424,8 +433,15 @@ def step_download(url: str, app: AppConfig, on_step=None) -> Path:
     dl.mkdir(parents=True, exist_ok=True)
     from .media import detect_source
     typ = detect_source(url)
-    if typ == "bilibili":
-        return _download_bilibili(url, dl)
     if typ == "douyin":
         return _download_douyin(url, dl, app.download, app.cache_dir, on_step=on_step)
-    raise DownloadError(f"不支持的平台或无法识别的输入: {url}")
+    if _BILIBILI_RE.search(url):
+        raise DownloadError(
+            "本工具只支持抖音链接（B 站分流已移除，D57）。能走通的路：\n"
+            "  ① 换抖音链接：同一内容若在抖音也有，用那个链接\n"
+            "  ② 本地文件：自己把视频存下来，再 `dystill run <文件路径>`（永远可用）"
+        )
+    raise DownloadError(
+        f"不支持的平台或无法识别的输入: {url}\n"
+        f"本工具只做抖音链接 + 本地视频/音频/图文文件（D57）"
+    )

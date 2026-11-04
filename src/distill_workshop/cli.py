@@ -5,6 +5,7 @@ import argparse
 import json
 import sys
 from importlib.resources import files
+from importlib.util import find_spec
 from pathlib import Path
 
 from . import __version__
@@ -37,9 +38,13 @@ def cmd_clean(args) -> int:
     from .core.artifacts import (
         cache_media_files,
         cleanup_cache,
+        cleanup_evidence,
+        cleanup_orphan_materials,
         cleanup_raw_material,
         cleanup_stale,
         cleanup_transcribe_scratch,
+        old_evidence,
+        orphan_material_dirs,
         raw_material,
         transcribe_scratch,
     )
@@ -61,9 +66,23 @@ def cmd_clean(args) -> int:
     doomed = cache_media_files(app.cache_dir, days=days)
     freed = sum(p.stat().st_size for p in doomed if p.exists())
     cleanup_cache(app.cache_dir, days=days, apply=args.apply)
+    purge_evidence = bool(getattr(args, "purge_evidence", False))
+    evidence = ([p for d in sorted(data_dir.iterdir()) if d.is_dir()
+                 for p in old_evidence(d, days=days)] if data_dir.is_dir() and purge_evidence else [])
+    evidence_mb = sum(p.stat().st_size for p in evidence if p.exists()) / 1024 / 1024
+    if purge_evidence:
+        cleanup_evidence(app.data_dir, days=days, apply=args.apply)
+    purge_orphans = bool(getattr(args, "purge_orphans", False))
+    orphans = orphan_material_dirs(data_dir, days=days) if purge_orphans else []
+    orphan_mb = sum(
+        sum(f.stat().st_size for f in d.rglob("*") if f.is_file())
+        for d in orphans if d.exists()
+    ) / 1024 / 1024
+    if purge_orphans:
+        cleanup_orphan_materials(data_dir, days=days, apply=args.apply)
 
-    if not stale and not scratch and not raw and not doomed:
-        print(f"没有需要清理的东西 ✅（下载缓存保留最近 {days} 天）")
+    if not stale and not scratch and not raw and not doomed and not evidence and not orphans:
+        print(f"没有需要清理的东西 ✅（媒体和切帧保留最近 {days} 天；文本证据默认长期保留）")
         return 0
     verb = "已删除" if args.apply else "发现"
     if stale:
@@ -74,18 +93,36 @@ def cmd_clean(args) -> int:
         print(f"{verb} {len(scratch)} 个转写中间物（音轨/分段，约 {scratch_mb:.0f} MB）"
               f"——转写成果有效，这些音轨已无用途")
     if raw:
-        print(f"{verb} {len(raw)} 项过期中间产物（转写/画面/切帧/核对报告，超过 {days} 天，"
-              f"约 {raw_mb:.0f} MB）——成品笔记保留不动")
+        print(f"{verb} {len(raw)} 项过期大文件（切帧目录，超过 {days} 天，"
+              f"约 {raw_mb:.1f} MB）——文本证据和成品笔记保留不动")
     if doomed:
         print(f"{verb} {len(doomed)} 个过期下载缓存（超过 {days} 天，约 {freed / 1024 / 1024:.0f} MB）：")
         for p in doomed[:10]:
             print(f"  - {p.name}")
         if len(doomed) > 10:
             print(f"  ... 另有 {len(doomed) - 10} 个")
+    if evidence:
+        print(f"{verb} {len(evidence)} 个过期可回查证据（超过 {days} 天，约 {evidence_mb:.1f} MB）：")
+        for p in evidence[:10]:
+            print(f"  - {p.parent.name}/{p.name}")
+        if len(evidence) > 10:
+            print(f"  ... 另有 {len(evidence) - 10} 个")
+    if orphans:
+        print(f"{verb} {len(orphans)} 个无笔记素材目录（超过 {days} 天，约 {orphan_mb:.1f} MB）：")
+        for d in orphans[:10]:
+            print(f"  - {d.name}")
+        if len(orphans) > 10:
+            print(f"  ... 另有 {len(orphans) - 10} 个")
     if not args.apply:
         print("\n以上只是报告，加 --apply 才真删。")
-        print("可再生的：下载缓存、转写音轨、中间产物（重跑会重新下载 + 重新转写）。")
-        print("永久保留：只有 note.md（成品笔记）——本工具的产物就是一份笔记。")
+        print("默认可删：下载缓存、转写音轨、切帧目录（重跑会重新下载 + 重新转写）。")
+        print("默认长期保留：转写、画面理解、核对报告（它们是笔记可回查的依据）。")
+    if purge_evidence:
+        print("⚠️ --purge-evidence 已启用：证据删除后旧记录无法再核对，只能重新下载原片重跑。")
+    elif not args.apply:
+        print("只有显式加 --purge-evidence，才会连同文本证据一起清。")
+    if purge_orphans:
+        print("⚠️ --purge-orphans 已启用：没有 note.md 的旧素材目录会被整体删除。")
     return 0
 
 
@@ -100,18 +137,20 @@ def cmd_run(args) -> int:
         keep_days = int(app.pipeline.get("cache_keep_days", 7) or 0)
     except (TypeError, ValueError):
         keep_days = 7
+    from .core.artifacts import (
+        cache_media_files,
+        cleanup_cache,
+        cleanup_raw_material,
+        raw_material,
+    )
+    data_dir = Path(app.data_dir)
+    announce = not getattr(args, "json", False)
+    _clean_finished_audio(data_dir, announce=announce)
     if keep_days > 0:
-        from .core.artifacts import (
-            cache_media_files,
-            cleanup_cache,
-            cleanup_raw_material,
-            raw_material,
-        )
         doomed = cache_media_files(app.cache_dir, days=keep_days)
         freed = sum(p.stat().st_size for p in doomed if p.exists())
         cleanup_cache(app.cache_dir, days=keep_days, apply=True)
-        # 原始素材（转写/画面/切帧）同样按保留期自动清，不必等用户手动跑 clean
-        data_dir = Path(app.data_dir)
+        # 只自动清大体积切帧；转写/画面/核对报告是回查证据，默认长期保留。
         raw = ([p for d in sorted(data_dir.iterdir()) if d.is_dir()
                 for p in raw_material(d, days=keep_days)] if data_dir.is_dir() else [])
         raw_mb = sum((sum(f.stat().st_size for f in p.rglob("*") if f.is_file())
@@ -122,10 +161,19 @@ def cmd_run(args) -> int:
                 print(f"🧹 清理过期下载缓存 {len(doomed)} 个（超过 {keep_days} 天），"
                       f"释放 {freed / 1024 / 1024:.0f} MB")
             if raw:
-                print(f"🧹 清理过期原始素材 {len(raw)} 项（超过 {keep_days} 天），"
-                      f"释放 {raw_mb / 1024 / 1024:.0f} MB（只保留 note.md）")
+                print(f"🧹 清理过期切帧 {len(raw)} 项（超过 {keep_days} 天），"
+                      f"释放 {raw_mb / 1024 / 1024:.1f} MB（文本证据保留）")
     stt = None
     if app.stt.backend == "faster-whisper":
+        if find_spec("faster_whisper") is None:
+            msg = ("本地转写组件未安装。请运行：pip install faster-whisper"
+                   "（源码目录也可运行 pip install -e '.[local-stt]'），"
+                   "然后重新运行 dystill doctor。")
+            if getattr(args, "json", False):
+                print(json.dumps([{"status": "failed", "error": msg}], ensure_ascii=False, indent=2))
+            else:
+                print(f"[!] {msg}")
+            return 2
         try:
             from .core.stt import FasterWhisperSTT
             stt = FasterWhisperSTT(app.stt.model, device=app.stt.device,
@@ -137,6 +185,11 @@ def cmd_run(args) -> int:
     # 不接的话 `_log` 走默认的 lambda 把消息丢掉，用户只会看到 exit=1 而没有任何提示（实测踩到）
     results = process_batch(args.urls, app, stt=stt, note_fn=default_note_fn(app),
                             on_step=None if getattr(args, "json", False) else print)
+    if stt is not None and getattr(stt, "last_fallback", ""):
+        message = f"⚠️ {stt.last_fallback}（转写结果不受影响，速度可能慢一些）"
+        print(message, file=sys.stderr if getattr(args, "json", False) else sys.stdout)
+    # 任务成功写完后立即清本轮音轨，不必等下一次 run；失败记录的无效转写会保留。
+    _clean_finished_audio(data_dir, announce=announce)
     failed = [r for r in results if r.get("status") not in SUCCESS_STATUSES]
     if getattr(args, "json", False):
         print(json.dumps(results, ensure_ascii=False, indent=2))
@@ -186,6 +239,22 @@ def cmd_check(args) -> int:
     if args.json:
         print(_json.dumps(out, ensure_ascii=False, indent=2))
     return 1 if failed else 0
+
+
+def _clean_finished_audio(data_dir: Path, *, announce: bool) -> None:
+    """清掉已有有效转写的临时音轨/分段；无效转写仍保留，供下次重跑。"""
+    from .core.artifacts import cleanup_transcribe_scratch, transcribe_scratch
+
+    data_dir = Path(data_dir)
+    scratch = ([p for d in sorted(data_dir.iterdir()) if d.is_dir()
+                for p in transcribe_scratch(d)] if data_dir.is_dir() else [])
+    if not scratch:
+        return
+    mb = sum(p.stat().st_size for p in scratch if p.exists()) / 1024 / 1024
+    cleanup_transcribe_scratch(data_dir, apply=True)
+    if announce:
+        print(f"🧹 清理已用完的转写音轨 {len(scratch)} 个，"
+              f"释放 {mb:.1f} MB（转写成果保留）")
 
 
 def cmd_kb(args) -> int:
@@ -301,11 +370,15 @@ def main(argv: list[str] | None = None) -> int:
     p_doc.add_argument("--probe", action="store_true", help="真实调用一次供应商验证连通（消耗少量 token）")
     p_doc.set_defaults(func=cmd_doctor)
 
-    p_clean = sub.add_parser("clean", help="清理失败残留目录（只有 meta.json、没产物的空壳）")
+    p_clean = sub.add_parser("clean", help="清理失败残留、转写音轨、过期媒体和切帧")
     p_clean.add_argument("--apply", action="store_true",
                          help="真的删除（默认只报告）。别在蒸馏/核对运行时执行")
     p_clean.add_argument("--cache-days", type=int, default=7,
-                         help="下载缓存保留天数，超过的算过期（默认 7；0=不清理缓存）")
+                         help="大文件保留天数（下载媒体/切帧，默认 7；0=不清理）")
+    p_clean.add_argument("--purge-evidence", action="store_true",
+                         help="连转写/画面/核对报告也按保留期清掉（之后无法再核对，谨慎使用）")
+    p_clean.add_argument("--purge-orphans", action="store_true",
+                         help="删除超过保留期、没有 note.md 的素材目录（清完笔记后的孤儿）")
     p_clean.set_defaults(func=cmd_clean)
 
     p_run = sub.add_parser("run", help="蒸馏：抖音链接 / 本地媒体文件 → 笔记（可批量）")

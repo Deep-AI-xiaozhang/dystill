@@ -7,7 +7,7 @@
 
 - Python **3.10 – 3.13**（CI 覆盖 3.10 / 3.12，Windows 跑 3.12）
 - 处理视频需要系统里可用的 **ffmpeg**（本地文件路径）；只做单元测试不需要
-- 本地 STT 需要可选依赖 `faster-whisper`；B 站分流需要 `yt-dlp`；抖音浏览器兜底需要 `playwright`
+- 本地 STT 需要可选依赖 `faster-whisper`；抖音浏览器兜底需要 `playwright`
 
 ```bash
 git clone https://github.com/Deep-AI-xiaozhang/dystill.git

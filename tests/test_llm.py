@@ -177,3 +177,32 @@ def test_extra_body_absent_by_default(monkeypatch):
     p = ProviderConfig(name="t", api_base="https://x/v1", api_key="k", model="m")
     chat([{"role": "user", "content": "hi"}], [p])
     assert "reasoning_effort" not in captured
+
+
+def test_requested_max_tokens_cannot_exceed_provider_limit(monkeypatch):
+    """调用方想要 6000，但供应商硬上限 1024：实际请求必须压到 1024。"""
+    seen = []
+
+    def fake_once(provider, messages, temperature, timeout, max_tokens=None):
+        seen.append(max_tokens)
+        return "ok"
+
+    monkeypatch.setattr(llm, "_chat_once", fake_once)
+    p = _p("limited")
+    p.max_tokens = 1024
+    chat([{"role": "user", "content": "hi"}], [p], max_tokens=6000)
+    assert seen == [1024]
+
+
+def test_provider_limit_is_used_when_caller_does_not_request(monkeypatch):
+    seen = []
+
+    def fake_once(provider, messages, temperature, timeout, max_tokens=None):
+        seen.append(max_tokens)
+        return "ok"
+
+    monkeypatch.setattr(llm, "_chat_once", fake_once)
+    p = _p("limited")
+    p.max_tokens = 1024
+    chat([{"role": "user", "content": "hi"}], [p])
+    assert seen == [1024]
