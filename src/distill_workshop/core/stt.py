@@ -22,6 +22,36 @@ _CUDA_RUNTIME_HINTS = (
     "cannot be loaded", "could not load",
 )
 
+def _ensure_cuda_path() -> None:
+    """自动探测本机已有的 CUDA 运行时（如 Ollama 或系统 CUDA Toolkit），将其加入 DLL 搜索路径。
+
+    Windows 下 ctranslate2 依赖 cublas64_12.dll / cublasLt64_12.dll，
+    本机 Ollama 已自带完整的官方 cuda_v12 动态库，自动绑定后免去手动配环境变量或重复安装数百 MB 依赖。
+    """
+    import os
+    candidates = [
+        r"C:\Users\PC\AppData\Local\Programs\Ollama\lib\ollama\cuda_v12",
+        r"C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v12.0\bin",
+        r"C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v12.1\bin",
+        r"C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v12.2\bin",
+        r"C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v12.4\bin",
+        r"C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v12.6\bin",
+        r"C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v12.8\bin",
+    ]
+    for d in candidates:
+        if os.path.isdir(d):
+            if hasattr(os, "add_dll_directory"):
+                try:
+                    os.add_dll_directory(d)
+                except (OSError, ValueError):
+                    pass
+            cur_path = os.environ.get("PATH", "")
+            if d.lower() not in cur_path.lower():
+                os.environ["PATH"] = d + ";" + cur_path
+            break
+
+_ensure_cuda_path()
+
 
 class BaseSTT(ABC):
     name: str = "base"

@@ -104,9 +104,12 @@ def run(cmd: list[str], timeout: int = 1200) -> subprocess.CompletedProcess:
 # ── 短链 / 身份 ──────────────────────────────────────────────
 def expand_short_link(url: str, timeout: int = 15) -> str | None:
     """展开 v.douyin.com 短链，返回最终 URL；失败返回 None（安全放弃，绝不猜）。"""
+    # 自动从文本中提取第一条 http/https 链接，剥离前后的汉字或表情符号
+    m = re.search(r"https?://[^\s\"'<>]+", url or "")
+    target_url = m.group(0) if m else url
     try:
         import urllib.request
-        req = urllib.request.Request(url, headers={"User-Agent": _UA})
+        req = urllib.request.Request(target_url, headers={"User-Agent": _UA})
         return urllib.request.urlopen(req, timeout=timeout).geturl()
     except (OSError, ValueError):
         return None
@@ -406,7 +409,7 @@ def _try_browser_fallback(url: str, dl: Path, on_step=None) -> Path | None:
         return None
     _tell(on_step, "   ↻ 切真浏览器兜底（绕开纯 HTTP 指纹识别，首次启动约 5-15s）...")
     try:
-        media = download_via_browser(url, dl)
+        media = download_via_browser(url, dl, on_step=on_step)
     except BrowserFallbackUnavailable as e:
         _tell(on_step, f"   浏览器兜底不可用：{e}")
         return None

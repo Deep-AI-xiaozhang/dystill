@@ -12,10 +12,8 @@ import re
 from pathlib import Path
 
 _AWEME_PATTERNS = (
-    re.compile(r"/video/(\d{6,})"),
-    re.compile(r"/note/(\d{6,})"),
-    re.compile(r"[?&]aweme_id=(\d{6,})"),
-    re.compile(r"[?&]item_ids=(\d{6,})"),
+    re.compile(r"/(?:video|note)/(\d{6,})"),
+    re.compile(r"[?&](?:aweme_id|item_ids|modal_id)=(\d{6,})"),
 )
 
 

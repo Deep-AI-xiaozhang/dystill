@@ -118,8 +118,19 @@ def response_json_or_none(response):
         return None
 
 
-def _download_gallery_images(ctx, page, dl: Path, final_url: str) -> list[Path]:
-    """从已打开的图文帖页面下载正文大图，返回本地路径。"""
+def _warn(on_step, msg: str) -> None:
+    """向进度回调发出警告；on_step 为 None 时静默（非交互/JSON 模式）。"""
+    if on_step:
+        on_step(msg)
+
+
+def _download_gallery_images(ctx, page, dl: Path, final_url: str,
+                              on_step=None) -> list[Path]:
+    """从已打开的图文帖页面下载正文大图，返回本地路径。
+
+    失败不再静默放弃：每张图的失败原因都通过 on_step 报出（可追查）；
+    全部失败时额外汇总一条告警，让上层有机会把"0 张图"当作错误处理。
+    """
     match = re.search(r"/(?:video|note)/(\d{6,})", final_url or "")
     if not match:
         return []
@@ -130,22 +141,31 @@ def _download_gallery_images(ctx, page, dl: Path, final_url: str) -> list[Path]:
             naturalWidth: img.naturalWidth,
             naturalHeight: img.naturalHeight
         }))""")
-    except Exception:  # noqa: BLE001 —— 页面已关闭时安全放弃，交给上层报错
+    except Exception as e:  # noqa: BLE001
+        # 页面已关闭是正常路径（视频帖走完就关了），其余异常值得告知
+        msg = str(e).lower()
+        if "closed" not in msg and "target" not in msg:
+            _warn(on_step, f"⚠️ 图文帖 JS 执行失败（{type(e).__name__}: {e}），无法获取图片列表")
         return []
+    candidates = gallery_image_urls(items)
     out: list[Path] = []
-    for index, url in enumerate(gallery_image_urls(items), 1):
+    for index, url in enumerate(candidates, 1):
         try:
             resp = ctx.request.get(url, timeout=60_000)
             if not resp.ok:
+                _warn(on_step, f"⚠️ 第 {index}/{len(candidates)} 张图 HTTP {resp.status}，跳过")
                 continue
             body = resp.body()
             if len(body) < 1024:
+                _warn(on_step, f"⚠️ 第 {index}/{len(candidates)} 张图体积异常（{len(body)} 字节），跳过")
                 continue
             path = Path(dl) / f"note_{aweme_id}_{index:02d}.jpg"
             path.write_bytes(body)
             out.append(path)
-        except Exception:  # noqa: BLE001,S112 —— 单张图失败不影响其余图片
-            continue
+        except Exception as e:  # noqa: BLE001 —— 单张图失败不影响其余图片，但要告知
+            _warn(on_step, f"⚠️ 第 {index}/{len(candidates)} 张图下载失败（{type(e).__name__}: {e}）")
+    if candidates and not out:
+        _warn(on_step, f"❌ 图文帖共 {len(candidates)} 张候选图，全部下载失败")
     return out
 
 
@@ -185,7 +205,8 @@ def _stream_via_requests(ctx, page, url: str, out: Path) -> tuple[bool, str]:
         return False, f"{type(e).__name__}: {e}"
 
 
-def download_via_browser(url: str, dl: Path, *, timeout_ms: int = 90_000) -> Path:
+def download_via_browser(url: str, dl: Path, *, timeout_ms: int = 90_000,
+                         on_step=None) -> Path:
     """打开视频页 → 拦 detail 响应 → 取 play_addr → 下 CDN，返回落盘路径。
 
     失败一律抛 BrowserFallbackUnavailable（环境问题）或 BrowserFallbackFailed（页面/网络问题），
@@ -228,7 +249,7 @@ def download_via_browser(url: str, dl: Path, *, timeout_ms: int = 90_000) -> Pat
                 detail = next(((d or {}).get("aweme_detail") for d in seen
                                if (d or {}).get("aweme_detail")), None)
                 if detail is None:
-                    images = _download_gallery_images(ctx, page, dl, page.url)
+                    images = _download_gallery_images(ctx, page, dl, page.url, on_step=on_step)
                     if images:
                         raise GalleryDetected(
                             f"图文帖（页面内找到 {len(images)} 张图片）", images=images)
@@ -238,7 +259,7 @@ def download_via_browser(url: str, dl: Path, *, timeout_ms: int = 90_000) -> Pat
 
                 urls = play_addr_urls(detail)
                 if not urls:
-                    images = _download_gallery_images(ctx, page, dl, page.url)
+                    images = _download_gallery_images(ctx, page, dl, page.url, on_step=on_step)
                     if images:
                         raise GalleryDetected(
                             f"图文帖（详情无播放地址，找到 {len(images)} 张图片）",

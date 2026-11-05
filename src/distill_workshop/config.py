@@ -93,6 +93,9 @@ class AppConfig:
     stt: STTConfig = field(default_factory=STTConfig)
     pipeline: dict = field(default_factory=dict)
     download: DownloadConfig = field(default_factory=DownloadConfig)
+    # 解析 config.yaml 时发现的未知顶层/provider 键，交给 doctor 报警告。
+    # 这些键目前被静默丢弃，在这里收集起来让用户有机会发现拼写错误。
+    unknown_config_keys: list[str] = field(default_factory=list)
 
     @property
     def ready_providers(self) -> list[ProviderConfig]:
@@ -151,6 +154,18 @@ def load_config(start: Path | None = None) -> AppConfig:
     data = workspace_path("data_dir", "data")
     cache = workspace_path("cache_dir", "cache")
 
+    # 收集未知键：顶层已知键 + providers/stt/download/workspace 里已知子键之外的都算拼写嫌疑。
+    # pipeline 是 dict 类型（刻意的灵活设计），不参与校验。
+    unknown_keys: list[str] = []
+    _TOP_KEYS = {"root", "workspace", "providers", "stt", "download", "pipeline"}
+    for k in raw:
+        if k not in _TOP_KEYS:
+            unknown_keys.append(k)
+    _WS_KEYS = {"notes_dir", "data_dir", "cache_dir"}
+    for k in ws:
+        if k not in _WS_KEYS:
+            unknown_keys.append(f"workspace.{k}")
+
     providers = []
     for p in raw.get("providers") or []:
         if not isinstance(p, dict):
@@ -159,6 +174,10 @@ def load_config(start: Path | None = None) -> AppConfig:
         # dataclass 构造会直接 TypeError 把整个工具打崩（实测踩到）。未知键丢弃而不是报错——
         # 配置的目的是\"能跑\"，多写一个没用的键不该让工具没法启动。
         known = {k: v for k, v in p.items() if k in ProviderConfig.__dataclass_fields__}
+        # 拼写错误（如 judge_privoder）通常是 provider 级的，收集起来报警告
+        for k in p:
+            if k not in ProviderConfig.__dataclass_fields__:
+                unknown_keys.append(f"providers[{p.get('name', '?')}].{k}")
         # key 文件路径也相对配置文件解析，否则换个目录敲命令就读不到 key
         if known.get("api_key_file"):
             known["api_key_file"] = resolve_relative(known["api_key_file"], root)
@@ -188,4 +207,5 @@ def load_config(start: Path | None = None) -> AppConfig:
         root=root, notes_dir=notes, data_dir=data, cache_dir=cache,
         providers=providers, stt=stt, pipeline=raw.get("pipeline") or {},
         download=DownloadConfig(**dcfg),
+        unknown_config_keys=unknown_keys,
     )

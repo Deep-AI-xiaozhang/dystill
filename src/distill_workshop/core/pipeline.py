@@ -10,6 +10,7 @@
 from __future__ import annotations
 
 import json
+import re
 import time
 from collections.abc import Callable
 from pathlib import Path
@@ -35,12 +36,16 @@ def _log(on_step: Callable, msg: str) -> None:
 
 def resolve_key(url_or_path: str) -> tuple[str, str]:
     """返回 (身份键, 来源类型)。本地文件用内容指纹；抖音链接必须解析出 aweme_id。"""
-    p = Path(url_or_path)
+    raw = (url_or_path or "").strip()
+    p = Path(raw)
     if p.is_file():
         return record_key(fingerprint=content_fingerprint(p)), "local"
-    src = detect_source(url_or_path)
+    # 如果用户输入中夹带中文分享词，先行提取纯净链接
+    m = re.search(r"https?://[^\s\"'<>]+", raw)
+    clean_target = m.group(0) if m else raw
+    src = detect_source(clean_target)
     if src == "douyin":
-        aweme = aweme_id_from_url(url_or_path)
+        aweme = aweme_id_from_url(clean_target)
         if not aweme:
             raise ValueError(f"无法从链接解析 aweme_id（短链展开失败或非视频页）: {url_or_path}")
         return record_key(aweme_id=aweme), src
@@ -160,16 +165,19 @@ def process_record(url_or_path: str, app: AppConfig, *,
         return artifacts
 
     # ① 媒体获取（图文帖由下载层识别 → 转图片流程，不转写、不切帧）
-    p = Path(url_or_path)
+    m = re.search(r"https?://[^\s\"'<>]+", str(url_or_path or ""))
+    clean_target = m.group(0) if m else url_or_path
+
+    p = Path(clean_target)
     if p.is_file():
         media = p
         _log(on_step, f"① 本地文件，跳过下载（{p.name}）")
     else:
         _log(on_step, "① 下载中（douyin-downloader）...")
         try:
-            media = step_download(url_or_path, app, on_step=on_step)
+            media = step_download(clean_target, app, on_step=on_step)
         except GalleryDetected as e:
-            return _process_gallery(url_or_path, app, out, artifacts, e.images,
+            return _process_gallery(clean_target, app, out, artifacts, e.images,
                                     vlm_fn=vlm_fn, note_fn=note_fn, on_step=on_step)
     artifacts["media"] = str(media)
 
@@ -225,6 +233,11 @@ def process_record(url_or_path: str, app: AppConfig, *,
 def process_batch(urls: list[str], app: AppConfig, **kwargs) -> list[dict]:
     """批量蒸馏：串行执行；单条失败不中断整批，末尾汇总（批量纪律）。"""
     on_step = kwargs.get("on_step") or (lambda m: None)
+    # 前置检查：有 note_fn 但没有 stt 时，每条都会先下载再崩——整批快速失败更友好。
+    if kwargs.get("note_fn") is not None and kwargs.get("stt") is None:
+        msg = "未配置 STT 后端：安装 faster-whisper（pip install 'dystill[local-stt]'）"
+        _log(on_step, f"❌ {msg}")
+        return [{"url": u, "status": "failed", "error": msg} for u in urls]
     results = []
     total = len(urls)
     for i, u in enumerate(urls, 1):

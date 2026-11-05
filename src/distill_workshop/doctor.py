@@ -54,6 +54,16 @@ def run_doctor(do_probe_calls: bool = False) -> dict:
             need_setup=True,
         ))
 
+    # 2c. config.yaml 含未识别的键——通常是拼写错误，静默丢弃容易让人白查半天
+    if cfg.unknown_config_keys:
+        checks.append(_check(
+            "config(unknown_keys)", False,
+            "发现未识别的配置键（可能是拼写错误，这些键目前被忽略）：" +
+            "、".join(cfg.unknown_config_keys),
+            fix="对照 config.example.yaml 检查拼写；pipeline.* 字段不在此范围",
+            need_setup=False,
+        ))
+
     # 3. STT 后端
     # 目前只有 faster-whisper 一种实现。配了别的名字必须报错而不是报绿——
     # 原实现写「云端，随 providers 走」+ status=ok，但 stt.py 里根本没有云端后端：
@@ -142,7 +152,10 @@ def run_doctor(do_probe_calls: bool = False) -> dict:
 
     # 必需项全部 OK 才算真的能开跑。只看模型会造成假绿：
     # 模型配好了但 STT/ffmpeg 缺失时，第一条视频仍会失败（首次安装实测踩到）。
-    ok = all(c["status"] == "ok" for c in checks if not c["name"].endswith("(可选)"))
+    # config(unknown_keys) 只警告不阻断——拼写错误不该让工具没法启动。
+    ok = all(c["status"] == "ok" for c in checks
+             if not c["name"].endswith("(可选)")
+             and c["name"] != "config(unknown_keys)")
     return {"ok": ok, "need_setup": [c for c in checks if c["status"] == "NEED_SETUP"], "checks": checks}
 
 

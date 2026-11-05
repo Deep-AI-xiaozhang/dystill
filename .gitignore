@@ -68,3 +68,10 @@ test*.txt
 
 # uv 锁文件（本仓库用 pip/pyproject 管理依赖，不锁版本；本地跑 uv 时别入库）
 uv.lock
+
+# 桌面图标与启动脚本（本地桌面使用，不污染跨平台源码库）
+app.ico
+app_v2.ico
+蒸馏工坊.cmd
+backup_notes/
+.codegraph/

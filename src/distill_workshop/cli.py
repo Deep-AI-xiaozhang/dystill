@@ -4,6 +4,7 @@ from __future__ import annotations
 import argparse
 import json
 import sys
+import threading
 from importlib.resources import files
 from importlib.util import find_spec
 from pathlib import Path
@@ -257,6 +258,22 @@ def _clean_finished_audio(data_dir: Path, *, announce: bool) -> None:
               f"释放 {mb:.1f} MB（转写成果保留）")
 
 
+def cmd_ui(args) -> int:
+    """启动本地高颜值 Web 交互界面."""
+    import webbrowser
+
+    from .web.server import start_server
+
+    port = args.port or 8765
+    url = f"http://127.0.0.1:{port}"
+    if not args.no_browser:
+        threading_timer = threading.Timer(0.8, lambda: webbrowser.open(url))
+        threading_timer.daemon = True
+        threading_timer.start()
+    start_server(port=port)
+    return 0
+
+
 def cmd_kb(args) -> int:
     """知识库：汇总所有笔记成索引 + 完整性自检。只归拢，不做价值判断。"""
     import datetime
@@ -414,6 +431,11 @@ def main(argv: list[str] | None = None) -> int:
     p_kb.add_argument("-o", "--out", help="索引输出路径（默认 <notes_dir>/知识库.md）")
     p_kb.add_argument("--json", action="store_true", help="结构化输出（供 agent 解析）")
     p_kb.set_defaults(func=cmd_kb)
+
+    p_ui = sub.add_parser("ui", help="启动本地高颜值极简 Web 界面（自动打开浏览器）")
+    p_ui.add_argument("-p", "--port", type=int, default=8765, help="服务端口（默认 8765）")
+    p_ui.add_argument("--no-browser", action="store_true", help="不自动拉起浏览器")
+    p_ui.set_defaults(func=cmd_ui)
 
     args = parser.parse_args(argv)
     return args.func(args)
